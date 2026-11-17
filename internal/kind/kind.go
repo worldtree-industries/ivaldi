@@ -25,6 +25,9 @@ const mjolnirModule = "github.com/dfryer1193/mjolnir@latest"
 type Kind struct {
 	// Name is the Kind as written in the Manifest and offered by add.
 	Name string
+	// Deployable is set for a Kind whose binaries are Deployables, built into
+	// images. The others are Tools.
+	Deployable bool
 	// Ask asks this Kind's follow-up questions about one binary. It may be nil
 	// when the Kind has none.
 	Ask func(q *Questions, name string) (Answers, error)

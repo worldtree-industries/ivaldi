@@ -152,10 +152,19 @@ func (b *binaryPlan) record(d discoveredBinary) error {
 	if err != nil {
 		return err
 	}
-	if d.dockerfile {
+	switch {
+	case d.dockerfile && k.Deployable:
 		settings = append(settings, manifest.Setting{Key: manifest.SettingBuild, Value: manifest.BuildDockerfile})
 		_, _ = fmt.Fprintf(b.out, "cmd/%s/Dockerfile exists, so %s is recorded with %s: %s.\n",
 			d.name, d.name, manifest.SettingBuild, manifest.BuildDockerfile)
+	case d.dockerfile:
+		_, _ = fmt.Fprintf(
+			b.out,
+			"Warning: cmd/%s/Dockerfile isn't used: %s is a %s, and Tools aren't built into images.\n",
+			d.name,
+			d.name,
+			k.Name,
+		)
 	}
 	if err = b.manifest.Add(d.name, k.Name, settings); err != nil {
 		return err

@@ -121,6 +121,34 @@ func TestAdoptionRecordsBuildDockerfileForABinarysOwnDockerfile(t *testing.T) {
 	}
 }
 
+func TestAdoptionWarnsThatAToolsDockerfileIsntUsed(t *testing.T) {
+	p := newProject(t)
+	p.write("go.mod", adoptedGoMod)
+	p.write("cmd/cli/main.go", mainSource("cli"))
+	p.write("cmd/cli/Dockerfile", "FROM scratch\n")
+
+	if err := p.run("tool\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if got := p.read(
+		".forge.yaml",
+	); !strings.Contains(got, "\n  cli:\n    kind: tool\n") ||
+		strings.Contains(got, "build:") {
+		t.Errorf("expected cli recorded as a tool without build, got:\n%s", got)
+	}
+	out := p.out.String()
+	if !strings.Contains(
+		out,
+		"Warning: cmd/cli/Dockerfile isn't used: cli is a tool, and Tools aren't built into images.",
+	) {
+		t.Errorf("expected a warning about cmd/cli/Dockerfile, got:\n%s", out)
+	}
+	if strings.Contains(out, "is recorded with build") {
+		t.Errorf("expected no build: dockerfile message, got:\n%s", out)
+	}
+}
+
 func TestAdoptionWarnsAboutARootDockerfile(t *testing.T) {
 	p := newProject(t)
 	p.write("go.mod", adoptedGoMod)

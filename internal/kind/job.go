@@ -28,9 +28,10 @@ const cronFields = 5
 // once per rollout or on a schedule.
 func Job() Kind {
 	return Kind{
-		Name:    "job",
-		Ask:     askJob,
-		Modules: []string{mjolnirModule},
+		Name:       "job",
+		Deployable: true,
+		Ask:        askJob,
+		Modules:    []string{mjolnirModule},
 	}
 }
 
