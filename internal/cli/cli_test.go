@@ -617,7 +617,7 @@ func TestAddReasksAnUnknownKind(t *testing.T) {
 		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
 	}
 
-	if got := strings.Count(p.out.String(), "Kind of a (job, tool): "); got != 2 {
+	if got := strings.Count(p.out.String(), "Kind of a (http, job, tool): "); got != 2 {
 		t.Errorf("expected the Kind of a asked twice, got %d times:\n%s", got, p.out)
 	}
 	p.read("cmd/a/main.go")
@@ -847,5 +847,189 @@ func TestAddNeverTouchesGitHub(t *testing.T) {
 	}
 	if strings.Contains(p.out.String(), "GitHub") {
 		t.Errorf("expected add to say nothing about GitHub, got:\n%s", p.out)
+	}
+}
+
+func TestAddHTTPRecordsKindAndDefaultPortAndFetchesMjolnir(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("web\nhttp\n\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if !strings.Contains(p.out.String(), "Port for web [8080]: ") {
+		t.Errorf("expected a port prompt defaulting to 8080, got:\n%s", p.out)
+	}
+	if !strings.Contains(p.read(".forge.yaml"), "\nbinaries:\n  web:\n    kind: http\n    port: 8080\n") {
+		t.Errorf("expected web recorded as http on port 8080, got:\n%s", p.read(".forge.yaml"))
+	}
+	main := p.read("cmd/web/main.go")
+	for _, want := range []string{
+		`"github.com/dfryer1193/mjolnir/router"`,
+		`"github.com/dfryer1193/mjolnir/health"`,
+		`"github.com/dfryer1193/mjolnir/utils/log"`,
+		"health.AlwaysStarted",
+		"TODO",
+		`os.Getenv("PORT")`,
+		`"8080"`,
+		"10 * time.Second",
+		"router.NewServer(",
+	} {
+		if !strings.Contains(main, want) {
+			t.Errorf("cmd/web/main.go doesn't contain %s:\n%s", want, main)
+		}
+	}
+
+	var goCmds []string
+	for _, c := range p.runner.requested {
+		if c.Name == "go" && c.Dir == p.dir {
+			goCmds = append(goCmds, c.String())
+		}
+	}
+	if want := []string{"go get github.com/dfryer1193/mjolnir@latest", "go mod tidy"}; !slices.Equal(goCmds, want) {
+		t.Errorf("go commands = %q, want %q", goCmds, want)
+	}
+}
+
+func TestAddHTTPDefaultPortSkipsPortsAlreadyUsed(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	p.write(".forge.yaml", "version: 1\nbinaries:\n  web:\n    kind: http\n    port: 8080\n"+
+		"  admin:\n    kind: http\n    port: 8082\n")
+
+	if err := p.run("a, b\nhttp\n\n\nhttp\n\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	out := p.out.String()
+	if !strings.Contains(out, "Port for a [8081]: ") || !strings.Contains(out, "Port for b [8083]: ") {
+		t.Errorf("expected defaults 8081 for a and 8083 for b, got:\n%s", out)
+	}
+	manifest := p.read(".forge.yaml")
+	if !strings.Contains(manifest, "  a:\n    kind: http\n    port: 8081\n  b:\n    kind: http\n    port: 8083\n") {
+		t.Errorf("expected a on 8081 and b on 8083, got:\n%s", manifest)
+	}
+	if !strings.Contains(p.read("cmd/b/main.go"), `"8083"`) {
+		t.Errorf("expected cmd/b to fall back to 8083:\n%s", p.read("cmd/b/main.go"))
+	}
+}
+
+func TestAddHTTPReasksAnInvalidOrUsedPort(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	p.write(".forge.yaml", "version: 1\nbinaries:\n  web:\n    kind: http\n    port: 9090\n")
+
+	if err := p.run("a\nhttp\nabc\n0\n65536\n9090\n9091\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if got := strings.Count(p.out.String(), "Port for a [8080]: "); got != 5 {
+		t.Errorf("expected the port asked 5 times, got %d:\n%s", got, p.out)
+	}
+	if !strings.Contains(p.out.String(), "9090 is already used") {
+		t.Errorf("expected a message that 9090 is taken, got:\n%s", p.out)
+	}
+	if !strings.Contains(p.read(".forge.yaml"), "  a:\n    kind: http\n    port: 9091\n") {
+		t.Errorf("expected a on 9091, got:\n%s", p.read(".forge.yaml"))
+	}
+}
+
+func TestAddHTTPFailsWhenInputEndsBeforeAPortWithNothingWritten(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	before := snapshot(t, p.dir)
+
+	if err := p.run("a\nhttp\nabc\n", "add"); err == nil {
+		t.Fatalf("expected add to fail")
+	}
+	if !maps.Equal(before, snapshot(t, p.dir)) {
+		t.Errorf("expected nothing written")
+	}
+	if len(p.runner.requested) != 0 {
+		t.Errorf("expected no commands, got %+v", p.runner.requested)
+	}
+}
+
+const clientQuestion = "Create a client layer"
+
+func TestAddHTTPCreatesClientLayerOnRequest(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("web\nhttp\n\ny\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if !strings.Contains(p.out.String(), clientQuestion+" (other Projects may import it)? [y/N]: ") {
+		t.Errorf("expected the client question defaulting to no, got:\n%s", p.out)
+	}
+	doc := p.read("client/doc.go")
+	if !strings.Contains(doc, "package client") || !strings.Contains(doc, "may import only models") {
+		t.Errorf("client/doc.go isn't the client layer's doc file:\n%s", doc)
+	}
+	if !strings.Contains(p.read(".golangci.yml"), "client may import only models") {
+		t.Errorf("expected the lint config to already cover client")
+	}
+}
+
+func TestAddHTTPCreatesNoClientLayerByDefault(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("web\nhttp\n\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if _, err := os.Stat(filepath.Join(p.dir, "client")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected no client directory, stat err = %v", err)
+	}
+}
+
+func TestAddAsksAboutClientOnlyForHTTPAndOnlyWhileItDoesNotExist(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup     func(p *project)
+		input     string
+		wantAsked int
+	}{
+		"tool only":                     {input: "a\ntool\n", wantAsked: 0},
+		"two http, first says yes":      {input: "a, b\nhttp\n\ny\nhttp\n\n", wantAsked: 1},
+		"two http, first says no":       {input: "a, b\nhttp\n\nn\nhttp\n\nn\n", wantAsked: 2},
+		"client already exists":         {setup: func(p *project) { p.write("client/doc.go", "package client\n") }, input: "a\nhttp\n\n", wantAsked: 0},
+		"client dir exists without doc": {setup: func(p *project) { p.write("client/client.go", "package client\n") }, input: "a\nhttp\n\n", wantAsked: 0},
+		"tool then http asks for http":  {input: "a, b\ntool\nhttp\n\n\n", wantAsked: 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newProject(t)
+			p.initProject()
+			if tc.setup != nil {
+				tc.setup(p)
+			}
+
+			if err := p.run(tc.input, "add"); err != nil {
+				t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+			}
+
+			if got := strings.Count(p.out.String(), clientQuestion); got != tc.wantAsked {
+				t.Errorf("client question asked %d times, want %d:\n%s", got, tc.wantAsked, p.out)
+			}
+		})
+	}
+}
+
+func TestInitCanCreateHTTPWithClientLayer(t *testing.T) {
+	p := newProject(t)
+
+	if err := p.run("github.com/acme/widget\nweb\nhttp\n\ny\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	p.read("client/doc.go")
+	if !strings.Contains(p.read(".forge.yaml"), "\nbinaries:\n  web:\n    kind: http\n    port: 8080\n") {
+		t.Errorf("expected web recorded as http on 8080, got:\n%s", p.read(".forge.yaml"))
+	}
+	if !p.runner.requestedLine(p.dir, "go get github.com/dfryer1193/mjolnir@latest") ||
+		!p.runner.requestedLine(p.dir, "go mod tidy") {
+		t.Errorf("expected mjolnir fetched and the module tidied, requested %+v", p.runner.requested)
 	}
 }
