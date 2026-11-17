@@ -8,6 +8,10 @@ Ivaldi sets up and grows opinionated Go repositories: it creates the project ske
 A single repository managed by Ivaldi, holding one or more related binaries that belong to the same domain.
 _Avoid_: Repo (when meaning the managed whole), workspace, app
 
+**Adoption**:
+Running `ivaldi init` in a repository that already has code, which makes it a Project: existing `cmd/<name>/` binaries are discovered and recorded in the Manifest, and existing files are only overwritten with the user's yes.
+_Avoid_: migration, import, conversion
+
 **Binary**:
 A build artifact of the project: the output of `go build` for one entry under `cmd/`. Every binary is either a Deployable or a Tool.
 _Avoid_: Executable, app, command

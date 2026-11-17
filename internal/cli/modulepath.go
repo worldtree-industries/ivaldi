@@ -3,6 +3,8 @@ package cli
 import (
 	"errors"
 	"fmt"
+	"go/version"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,7 +16,7 @@ import (
 // askModulePath returns the module path of an existing go.mod, or asks for
 // one, defaulting from origin.
 func (s session) askModulePath() (string, error) {
-	hasGoMod, err := scaffold.Exists(s.env.Dir, "go.mod")
+	hasGoMod, err := scaffold.Exists(s.env.Dir, scaffold.GoModPath)
 	if err != nil {
 		return "", err
 	}
@@ -54,7 +56,7 @@ func modulePathFromRemote(remote string) string {
 
 // readModulePath returns the module path declared in the Project's go.mod.
 func readModulePath(dir string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	content, err := os.ReadFile(filepath.Join(dir, scaffold.GoModPath))
 	if err != nil {
 		return "", fmt.Errorf("reading the module path: %w", err)
 	}
@@ -67,4 +69,47 @@ func readModulePath(dir string) (string, error) {
 		}
 	}
 	return "", errors.New("go.mod declares no module path")
+}
+
+// minGoVersion is the lowest go line a Project may have: mjolnir needs it.
+const minGoVersion = "1.27"
+
+// askGoLine asks whether to raise an existing go.mod's go line when it's
+// below minGoVersion, defaulting to yes. It returns whether to raise it.
+func (s session) askGoLine() (bool, error) {
+	content, err := os.ReadFile(filepath.Join(s.env.Dir, scaffold.GoModPath))
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	current := goLine(content)
+	if current != "" && version.Compare("go"+current, "go"+minGoVersion) >= 0 {
+		return false, nil
+	}
+	if s.prompt.Bool("Raise the go line to "+minGoVersion+"?", true) {
+		return true, nil
+	}
+	if current == "" {
+		current = "missing"
+	}
+	s.sayf("Warning: keeping the go line (%s): mjolnir needs go %s, so http and job binaries won't build "+
+		"until you raise it.", current, minGoVersion)
+	return false, nil
+}
+
+// goLine returns the version on go.mod's go line, or "" if it has none.
+func goLine(goMod []byte) string {
+	for line := range strings.SplitSeq(string(goMod), "\n") {
+		if fields := strings.Fields(line); len(fields) >= 2 && fields[0] == "go" {
+			return fields[1]
+		}
+	}
+	return ""
+}
+
+// raiseGoLine raises go.mod's go line to minGoVersion.
+func (s session) raiseGoLine() {
+	s.runAfterWrite("raise the go line", s.command("go", "mod", "edit", "-go="+minGoVersion))
 }

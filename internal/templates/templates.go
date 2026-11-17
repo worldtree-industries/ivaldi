@@ -19,6 +19,11 @@ var Makefile []byte
 //go:embed ivaldi.mk
 var SharedMakefile []byte
 
+// PreCommit is the Managed pre-commit hook, .githooks/pre-commit.
+//
+//go:embed pre-commit
+var PreCommit []byte
+
 // Gitignore is the Unmanaged .gitignore.
 //
 //go:embed gitignore

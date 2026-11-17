@@ -18,14 +18,26 @@ Both commands work on the current directory, take no arguments and ask everythin
 
 ### `ivaldi init`
 
-Sets up a new Project in the current directory:
+Sets up a Project in the current directory, which may be empty or already hold code:
 
 1. Refuses to run if `.forge.yaml` already exists (use `ivaldi add` instead).
 2. Asks for the module path, unless there's already a `go.mod`, whose module path it uses. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
-3. Asks for binaries, exactly as `ivaldi add` does. A blank answer creates a Project with no binaries yet.
-4. Runs `git init` unless the directory is already the top level of a git repository. A directory inside another repository (a subdirectory of a monorepo, say) gets its own repository, and the outer repository's `origin` is never used for the module path or GitHub settings.
-5. Writes the Project files, skipping any file that already exists. It never overwrites anything, so you can run it in a partly set-up repository.
-6. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
+3. Asks about existing binaries (see [Adoption](#adoption)), then asks for new binaries, exactly as `ivaldi add` does. A blank answer means no new binaries.
+4. Asks about existing files and the go line (see [Adoption](#adoption)). Every question comes before anything is written, so a failed answer leaves the directory untouched.
+5. Runs `git init` unless the directory is already the top level of a git repository. A directory inside another repository (a subdirectory of a monorepo, say) gets its own repository, and the outer repository's `origin` is never used for the module path or GitHub settings.
+6. Writes the Project files, skipping any file that already exists unless you agreed to overwrite it.
+7. Turns on the pre-commit hook with `git config core.hooksPath .githooks`, in the Project's own repository only (never a repository it's inside), unless you kept your own `.githooks/pre-commit`. If that fails, `init` still succeeds: it warns and prints the command to run later.
+8. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
+
+#### Adoption
+
+Running `init` in a repo that already has Go code makes it a Project:
+
+- **Binaries.** Every `cmd/<name>/` holding `package main` is an existing binary. `init` asks each one's Kind and that Kind's questions, as `add` does (ports stay unique across existing and new binaries), and records it in the Manifest. It never rewrites its `main.go` or fetches modules for it. A name that breaks the binary-name rules is an error, and nothing is written. A `package main` anywhere else (a root `main.go`, `tools/gen/`) gets a warning and is left alone.
+- **Dockerfiles.** A `cmd/<name>/Dockerfile` records `build: dockerfile` for that binary when it's a Deployable; a Tool's gets a warning, since Tools aren't built into images. A root `Dockerfile` gets a warning: Ivaldi doesn't use it, so move it to `cmd/<name>/`.
+- **Existing files.** `init` lists each file it would write that already exists, marked Managed or Unmanaged, and asks about each one: overwrite it? The default, and end of input, is no. Keeping one warns what you lose (for example, a kept `Makefile` needs `include ivaldi.mk` added by hand, and a kept `.githooks/pre-commit` means `core.hooksPath` isn't set). `go.mod`, `README.md` and the Layers' `doc.go` files are never overwritten, and an existing `.gitignore` gets only its missing `/bin/` and `/logs/` lines appended.
+- **Go line.** If `go.mod`'s `go` line is below 1.27 (which mjolnir needs), `init` asks to raise it, default yes, and runs `go mod edit -go=1.27`.
+- **Other code.** Packages outside the Layers and `cmd/` (`internal/`, `pkg/`, …) are left alone: the Layer rules cover only the Layer packages.
 
 ### `ivaldi add`
 
@@ -91,10 +103,13 @@ Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unl
 
 **Managed files** are identical in every Project and you shouldn't edit them. Ivaldi writes them at `init`; keeping them current afterwards is a separate system's job.
 
-- `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>` and `install`. Binaries are discovered from `cmd/` each time make runs.
+- `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>`, `install` and `setup-hooks`. Binaries are discovered from `cmd/` each time make runs.
+- `.githooks/pre-commit`: runs `make lint test` before every commit. It needs golangci-lint v2 on `PATH`, and says how to install it if it's missing. `git commit --no-verify` skips it. `core.hooksPath` isn't cloned, so run `make setup-hooks` once in each fresh clone.
+
+  To give an existing Go repo the same hook, including a Project created before Ivaldi generated it, use the `ivaldi-hooks` agent skill in `skills/ivaldi-hooks/`. Install it by symlinking that directory into your agent's skills directory, for example `ln -s "$PWD/skills/ivaldi-hooks" ~/.config/opencode/skills/ivaldi-hooks` from a clone of this repo.
 - `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets and runs with read-only permissions.
 
-**Unmanaged files** are written once, if missing, and then belong to you. Ivaldi never touches them again.
+**Unmanaged files** are written once, if missing (or, during [Adoption](#adoption), if you agree to overwrite yours), and then belong to you. Ivaldi never touches them again.
 
 - `Makefile`, which includes `ivaldi.mk`. Add your own targets here.
 - `.golangci.yml`: [maratori's golden config](https://github.com/maratori/golangci-lint-config) plus the Layer rules
@@ -125,10 +140,10 @@ This needs `origin` to point at GitHub and `gh` to be authenticated with admin r
 
 ## Developing Ivaldi
 
-Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` and `ivaldi.mk` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
+Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml`, `ivaldi.mk` and `.githooks/pre-commit` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
 
 - `make test` runs the unit tests. They run offline.
-- `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
+- `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint, and to commit through its pre-commit hook, which must block a lint failure. It also adopts a small existing repo (a `cmd/` binary and a Makefile) and requires that to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
 - `make lint` runs golangci-lint. Also run `golangci-lint run --build-tags e2e` to lint the e2e tests.
 - `make setup-hooks` turns on a pre-commit hook that runs `make lint test`.
 - `docs/extending-ivaldi.md` covers adding a Kind and testing at the command seam.

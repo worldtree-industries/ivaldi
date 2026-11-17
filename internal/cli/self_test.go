@@ -40,6 +40,34 @@ func TestIvaldiSharedMakeFileIsTheOneInitWrites(t *testing.T) {
 	}
 }
 
+func TestIvaldiPreCommitHookIsTheOneInitWrites(t *testing.T) {
+	p := newProject(t)
+	if err := p.run("github.com/worldtree-industries/ivaldi\n", "init"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	ownPath := filepath.Join(ivaldiRoot, filepath.FromSlash(hookPath))
+	own, err := os.ReadFile(ownPath)
+	if err != nil {
+		t.Fatalf("expected Ivaldi to have its own %s: %v", hookPath, err)
+	}
+	if string(own) != p.read(hookPath) {
+		t.Errorf("expected Ivaldi's %s to be exactly the one init writes; copy it from a fresh init", hookPath)
+	}
+	if info, statErr := os.Stat(ownPath); statErr != nil || info.Mode().Perm()&0o111 != 0o111 {
+		t.Errorf("expected Ivaldi's %s to be executable, got %v (%v)", hookPath, info.Mode(), statErr)
+	}
+}
+
+func TestIvaldiMakefileLeavesSetupHooksToTheSharedMakeFile(t *testing.T) {
+	own, err := os.ReadFile(filepath.Join(ivaldiRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("expected Ivaldi to have its own Makefile: %v", err)
+	}
+	if strings.Contains(string(own), "\nsetup-hooks:") {
+		t.Errorf("expected setup-hooks to come only from ivaldi.mk, got Ivaldi's Makefile:\n%s", own)
+	}
+}
+
 func TestIvaldiMakefileIncludesTheSharedMakeFileAndKeepsE2E(t *testing.T) {
 	own, err := os.ReadFile(filepath.Join(ivaldiRoot, "Makefile"))
 	if err != nil {

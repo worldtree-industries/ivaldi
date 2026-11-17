@@ -22,9 +22,10 @@ const (
 // router, listening on a port unique within the Project.
 func HTTP() Kind {
 	return Kind{
-		Name:    "http",
-		Ask:     askHTTP,
-		Modules: []string{mjolnirModule},
+		Name:       "http",
+		Deployable: true,
+		Ask:        askHTTP,
+		Modules:    []string{mjolnirModule},
 	}
 }
 

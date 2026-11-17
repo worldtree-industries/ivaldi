@@ -51,7 +51,7 @@ var ErrUsage = errors.New("usage")
 const usage = `Usage: ivaldi <command>
 
 Commands:
-  init     Set up a new Project in the current directory
+  init     Set up a Project in the current directory, new or with existing code
   add      Add binaries to the Project in the current directory
 `
 
@@ -170,6 +170,11 @@ func (s session) output(name string, args ...string) (string, error) {
 
 func runInit(s *session) error {
 	s.ownRepo = s.isRepositoryTopLevel()
+	found, err := discover(s.env.Dir)
+	if err != nil {
+		return err
+	}
+	s.warn(found)
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
 	modulePath, err := s.askModulePath()
@@ -182,7 +187,26 @@ func runInit(s *session) error {
 		return err
 	}
 	m := manifest.Empty()
-	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, files, true)
+	plan := s.newBinaryPlan(modulePath, m, files)
+	if len(found.binaries) > 0 {
+		s.sayf("Found existing binaries in cmd/: %s. Their code is left as it is.", found.names())
+	}
+	for _, d := range found.binaries {
+		if err = plan.record(d); err != nil {
+			return err
+		}
+	}
+	if err = plan.askNew(true); err != nil {
+		return err
+	}
+	managedHook, err := s.askOverwrites(files)
+	if err != nil {
+		return err
+	}
+	if err = s.planAppends(files); err != nil {
+		return err
+	}
+	raiseGoLine, err := s.askGoLine()
 	if err != nil {
 		return err
 	}
@@ -201,12 +225,41 @@ func runInit(s *session) error {
 	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
 		return err
 	}
+	if raiseGoLine {
+		s.raiseGoLine()
+	}
+	// The Project directory is its own repository's top level by now, so this
+	// never touches the config of a repository it's merely inside.
+	if managedHook {
+		s.turnOnHooks()
+	}
 	if !plan.empty() {
 		s.fetchModules(plan)
 	}
 
 	s.applyGitHubSettings()
 	return nil
+}
+
+// turnOnHooks points the Project's repository at its Managed hooks.
+func (s session) turnOnHooks() {
+	s.runAfterWrite("turn on the pre-commit hook", s.command("git", "config", "core.hooksPath", scaffold.HooksDir))
+}
+
+// runAfterWrite runs cmds in order, after the files are written. A failure
+// doesn't fail the command, since the files are already there: it warns, and
+// prints the commands still to run to finish what (such as "raise the go
+// line").
+func (s session) runAfterWrite(what string, cmds ...Command) {
+	for i, cmd := range cmds {
+		if _, err := s.exec(cmd, true); err != nil {
+			s.sayf("Warning: %s failed (%v). To %s, run:", cmd, err, what)
+			for _, rest := range cmds[i:] {
+				s.sayf("  %s", shellQuote(append([]string{rest.Name}, rest.Args...)))
+			}
+			return
+		}
+	}
 }
 
 // isRepositoryTopLevel reports whether the Project directory is the top level
@@ -257,8 +310,8 @@ func runAdd(s *session) error {
 		return err
 	}
 
-	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, nil, false)
-	if err != nil {
+	plan := s.newBinaryPlan(modulePath, m, nil)
+	if err = plan.askNew(false); err != nil {
 		return err
 	}
 

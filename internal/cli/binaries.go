@@ -25,8 +25,7 @@ var binaryName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // binaryPlan is everything the binaries prompt decided, before anything is
 // written.
 type binaryPlan struct {
-	prompt     *prompt.Prompter
-	dir        string
+	session    session
 	modulePath string
 	// manifest gets each planned binary added to it.
 	manifest *manifest.Manifest
@@ -41,33 +40,35 @@ type binaryPlan struct {
 	modules []string
 }
 
+// empty reports whether no new binaries are planned.
 func (b *binaryPlan) empty() bool {
 	return len(b.names) == 0
 }
 
-// planBinaries runs the binaries prompt: it asks for names, validates all of
-// them, then asks each one's Kind and the Kind's follow-up questions, and adds
-// each binary to m. It writes nothing. planned are files that will be written
-// in the same run, and count as existing. When allowNone is true, a blank
-// answer means no binaries.
-func planBinaries(
-	p *prompt.Prompter, dir, modulePath string, m *manifest.Manifest, planned []scaffold.File, allowNone bool,
-) (*binaryPlan, error) {
-	names, err := askNames(p, allowNone)
-	if err != nil {
-		return nil, err
-	}
-	if err = validateNames(dir, names, m.Binaries()); err != nil {
-		return nil, err
-	}
+// newBinaryPlan starts a plan that adds binaries to m, in the Project with
+// modulePath. planned are files that will be written in the same run, and
+// count as existing.
+func (s session) newBinaryPlan(modulePath string, m *manifest.Manifest, planned []scaffold.File) *binaryPlan {
+	return &binaryPlan{session: s, modulePath: modulePath, manifest: m, planned: planned}
+}
 
-	plan := &binaryPlan{prompt: p, dir: dir, modulePath: modulePath, manifest: m, planned: planned}
+// askNew asks for new binaries' names, validates all of them, then asks each
+// one's Kind and the Kind's follow-up questions, and plans it. It writes
+// nothing. When allowNone is true, a blank answer means no binaries.
+func (b *binaryPlan) askNew(allowNone bool) error {
+	names, err := askNames(b.session.prompt, allowNone)
+	if err != nil {
+		return err
+	}
+	if err = validateNames(b.session.env.Dir, names, b.manifest.Binaries()); err != nil {
+		return err
+	}
 	for _, name := range names {
-		if err = plan.add(name); err != nil {
-			return nil, err
+		if err = b.add(name); err != nil {
+			return err
 		}
 	}
-	return plan, nil
+	return nil
 }
 
 // exists reports whether rel is in the Project, or planned in this run.
@@ -76,39 +77,76 @@ func (b *binaryPlan) exists(rel string) (bool, error) {
 	if slices.ContainsFunc(b.planned, isRel) || slices.ContainsFunc(b.files, isRel) {
 		return true, nil
 	}
-	return scaffold.Exists(b.dir, rel)
+	return scaffold.Exists(b.session.env.Dir, rel)
 }
 
-// add asks name's Kind and the Kind's follow-up questions, adds it to the
-// Manifest, and plans its files.
-func (b *binaryPlan) add(name string) error {
-	kindName, err := b.prompt.Choice("Kind of "+name, kind.Names())
+// ask asks name's Kind and the Kind's follow-up questions, and plans any extra
+// files the answers need.
+func (b *binaryPlan) ask(name string) (kind.Kind, []manifest.Setting, error) {
+	kindName, err := b.session.prompt.Choice("Kind of "+name, kind.Names())
 	if err != nil {
-		return err
+		return kind.Kind{}, nil, err
 	}
 	k, _ := kind.Lookup(kindName)
 
 	var answers kind.Answers
 	if k.Ask != nil {
-		q := &kind.Questions{Prompt: b.prompt, Binaries: b.manifest.Binaries(), Exists: b.exists}
+		q := &kind.Questions{Prompt: b.session.prompt, Binaries: b.manifest.Binaries(), Exists: b.exists}
 		if answers, err = k.Ask(q, name); err != nil {
-			return err
+			return kind.Kind{}, nil, err
 		}
 	}
-	main, err := k.Main(name, b.modulePath, answers.Settings)
+	b.files = append(b.files, answers.Files...)
+	return k, answers.Settings, nil
+}
+
+// add asks a new binary's Kind and the Kind's follow-up questions, adds it to
+// the Manifest, and plans its files.
+func (b *binaryPlan) add(name string) error {
+	k, settings, err := b.ask(name)
 	if err != nil {
 		return err
 	}
-	if err = b.manifest.Add(name, k.Name, answers.Settings); err != nil {
+	main, err := k.Main(name, b.modulePath, settings)
+	if err != nil {
+		return err
+	}
+	if err = b.manifest.Add(name, k.Name, settings); err != nil {
 		return err
 	}
 	b.names = append(b.names, name)
 	b.files = append(b.files, main)
-	b.files = append(b.files, answers.Files...)
 	for _, mod := range k.Modules {
 		if !slices.Contains(b.modules, mod) {
 			b.modules = append(b.modules, mod)
 		}
+	}
+	return nil
+}
+
+// record asks a discovered binary's Kind and the Kind's follow-up questions
+// and adds it to the Manifest. Its main is never regenerated and its Kind's
+// modules aren't fetched: the code is the user's.
+func (b *binaryPlan) record(d discoveredBinary) error {
+	k, settings, err := b.ask(d.name)
+	if err != nil {
+		return err
+	}
+	switch {
+	case d.dockerfile && k.Deployable:
+		settings = append(settings, manifest.Setting{Key: manifest.SettingBuild, Value: manifest.BuildDockerfile})
+		b.session.sayf("cmd/%s/Dockerfile exists, so %s is recorded with %s: %s.",
+			d.name, d.name, manifest.SettingBuild, manifest.BuildDockerfile)
+	case d.dockerfile:
+		b.session.sayf(
+			"Warning: cmd/%s/Dockerfile isn't used: %s is a %s, and Tools aren't built into images.",
+			d.name,
+			d.name,
+			k.Name,
+		)
+	}
+	if err = b.manifest.Add(d.name, k.Name, settings); err != nil {
+		return err
 	}
 	return nil
 }
@@ -133,14 +171,19 @@ func askNames(p *prompt.Prompter, allowNone bool) ([]string, error) {
 	return names, nil
 }
 
+// invalidNameError is the error for a name that fails the binary-name rules.
+func invalidNameError(name string) error {
+	return fmt.Errorf("invalid binary name %q: use a lowercase letter followed by up to 62 "+
+		"lowercase letters, digits or hyphens", name)
+}
+
 // validateNames checks every name before anything is asked or written, and
 // names the first bad entry.
 func validateNames(dir string, names []string, existing []manifest.Binary) error {
 	for i, name := range names {
 		switch {
 		case !binaryName.MatchString(name):
-			return fmt.Errorf("invalid binary name %q: use a lowercase letter followed by up to 62 "+
-				"lowercase letters, digits or hyphens", name)
+			return invalidNameError(name)
 		case slices.Contains(names[:i], name):
 			return fmt.Errorf("binary %q is listed more than once", name)
 		case slices.ContainsFunc(existing, func(b manifest.Binary) bool { return b.Name == name }):
@@ -158,22 +201,13 @@ func validateNames(dir string, names []string, existing []manifest.Binary) error
 }
 
 // fetchModules fetches each module the new binaries' Kinds need, then tidies
-// the module. A failure doesn't fail the command, since the files are already
-// written: it warns and prints the commands still to run.
+// the module.
 func (s session) fetchModules(plan *binaryPlan) {
 	var cmds []Command
 	for _, mod := range plan.modules {
 		cmds = append(cmds, s.command("go", "get", mod))
 	}
 	cmds = append(cmds, s.command("go", "mod", "tidy"))
-	for i, cmd := range cmds {
-		if _, err := s.exec(cmd, true); err != nil {
-			s.sayf("Warning: %s failed (%v). To finish, run:", cmd, err)
-			for _, rest := range cmds[i:] {
-				s.sayf("  %s", shellQuote(append([]string{rest.Name}, rest.Args...)))
-			}
-			break
-		}
-	}
+	s.runAfterWrite("finish", cmds...)
 	s.sayf("Added %s.", strings.Join(plan.names, ", "))
 }
