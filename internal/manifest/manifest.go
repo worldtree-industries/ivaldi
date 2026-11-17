@@ -39,11 +39,6 @@ func Exists(dir string) (bool, error) {
 	return scaffold.Exists(dir, FileName)
 }
 
-// New returns the Manifest file of a Project with no binaries.
-func New() scaffold.File {
-	return scaffold.File{Path: FileName, Content: []byte(initial)}
-}
-
 // Binary is one binary's entry in the Manifest.
 type Binary struct {
 	Name string
