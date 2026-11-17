@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -41,6 +42,36 @@ func (p *Prompter) String(message, defaultValue string) string {
 		return defaultValue
 	}
 	return input
+}
+
+// ErrNoInput is returned when input ends before a required answer is given.
+var ErrNoInput = errors.New("input ended before an answer was given")
+
+// Required prompts for a non-empty string with a default value (none if
+// empty), re-asking while the answer is blank.
+func (p *Prompter) Required(message, defaultValue string) (string, error) {
+	for {
+		if defaultValue != "" {
+			fmt.Fprintf(p.out, "%s [%s]: ", message, defaultValue)
+		} else {
+			fmt.Fprintf(p.out, "%s: ", message)
+		}
+
+		if !p.scanner.Scan() {
+			if err := p.scanner.Err(); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("%s: %w", message, ErrNoInput)
+		}
+
+		if input := strings.TrimSpace(p.scanner.Text()); input != "" {
+			return input, nil
+		}
+		if defaultValue != "" {
+			return defaultValue, nil
+		}
+		fmt.Fprintln(p.out, "An answer is required.")
+	}
 }
 
 // Bool prompts for a yes/no answer.

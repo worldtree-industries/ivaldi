@@ -9,9 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
+	"net/url"
 	"strings"
 
+	"github.com/worldtree-industries/ivaldi/internal/manifest"
 	"github.com/worldtree-industries/ivaldi/internal/prompt"
 	"github.com/worldtree-industries/ivaldi/internal/scaffold"
 )
@@ -53,13 +54,6 @@ Commands:
   init     Initialize a new Go project interactively
 `
 
-const (
-	choiceHTTP        = 0
-	choiceWorker      = 1
-	choiceCLI         = 2
-	choiceInteractive = 3
-)
-
 // Run dispatches args (without the program name) to a command.
 func Run(ctx context.Context, env Env, args []string) error {
 	if len(args) != 1 || args[0] != "init" {
@@ -95,84 +89,96 @@ func (s session) run(name string, args ...string) error {
 	return nil
 }
 
+func (s session) output(name string, args ...string) (string, error) {
+	cmd := Command{Dir: s.env.Dir, Name: name, Args: args}
+	output, err := s.env.Runner.Run(s.ctx, cmd)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", cmd, err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
 func runInit(ctx context.Context, env Env) error {
 	s := session{ctx: ctx, env: env}
 	p := prompt.New(env.In, env.Out)
-	baseDirName := filepath.Base(env.Dir)
 
-	projectCfg := &scaffold.ProjectConfig{GoVersion: "1.26"}
-
-	s.sayf("=== Ivaldi Project Scaffold ===")
-	projectCfg.ModulePath = p.String("Module Path", baseDirName)
-
-	s.sayf("\nConfigure binaries (comma separated names). Leave blank to finish.")
-	projectCfg.Binaries = askBinaries(p, p.String("Binaries", baseDirName))
-
-	projectCfg.SetupCI = p.Bool("Setup GitHub Actions CI?", false)
-
-	s.sayf("\nInitializing go.mod...")
-	hasGoMod, err := scaffold.Exists(env.Dir, "go.mod")
+	hasManifest, err := manifest.Exists(env.Dir)
 	if err != nil {
 		return err
 	}
-	if hasGoMod {
-		s.sayf("go.mod already exists, skipping init")
-	} else if err = s.run("go", "mod", "init", projectCfg.ModulePath); err != nil {
+	if hasManifest {
+		return fmt.Errorf("%s already exists, so this is already an Ivaldi Project: use ivaldi add to add binaries",
+			manifest.FileName)
+	}
+
+	s.sayf("=== Ivaldi: new Project ===")
+	// Ask everything before changing anything, so a failed answer leaves the
+	// directory as it was.
+	modulePath, err := p.Required("Module path", s.originModulePath())
+	if err != nil {
 		return err
 	}
 
-	s.sayf("Creating directories...")
-	if err = scaffold.CreateDirectories(env.Dir, projectCfg.Binaries); err != nil {
+	if err = s.ensureGitRepository(); err != nil {
 		return err
 	}
 
-	s.sayf("Writing main.go files...")
-	if err = scaffold.WriteMainFiles(env.Dir, env.Out, projectCfg); err != nil {
+	files, err := scaffold.Skeleton(modulePath)
+	if err != nil {
+		return err
+	}
+	// The Manifest goes last: once it exists, init refuses to run again.
+	if err = scaffold.Write(env.Dir, env.Out, append(files, manifest.New())); err != nil {
 		return err
 	}
 
-	s.sayf("Running go mod tidy to fetch dependencies...")
-	if err = s.run("go", "mod", "tidy"); err != nil {
-		s.sayf("Warning: go mod tidy failed: %v", err)
-	}
-
-	s.sayf("Writing tooling files...")
-	if err = scaffold.WriteTooling(env.Dir, env.Out, projectCfg); err != nil {
-		return err
-	}
-
-	s.sayf("Done!")
+	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
 }
 
-func askBinaries(p *prompt.Prompter, binariesInput string) []scaffold.Binary {
-	opts := []string{
-		"HTTP Server (mjolnir + zerolog)",
-		"Background Worker (zerolog)",
-		"CLI Tool (standard library)",
-		"Interactive CLI",
+// ensureGitRepository runs git init unless the Project directory is already
+// inside a git work tree. It never commits.
+func (s session) ensureGitRepository() error {
+	if _, err := s.output("git", "rev-parse", "--is-inside-work-tree"); err == nil {
+		return nil
 	}
+	return s.run("git", "init")
+}
 
-	var binaries []scaffold.Binary
-	for name := range strings.SplitSeq(binariesInput, ",") {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-
-		var binType string
-		switch p.Select(fmt.Sprintf("Select type for binary '%s':", name), opts) {
-		case choiceHTTP:
-			binType = "http"
-		case choiceWorker:
-			binType = "worker"
-		case choiceCLI:
-			binType = "cli"
-		case choiceInteractive:
-			binType = "interactive"
-		}
-
-		binaries = append(binaries, scaffold.Binary{Name: name, Type: binType})
+// originModulePath derives a module path from the origin remote, or returns ""
+// when there is no usable remote.
+func (s session) originModulePath() string {
+	remote, err := s.output("git", "remote", "get-url", "origin")
+	if err != nil {
+		return ""
 	}
-	return binaries
+	return modulePathFromRemote(remote)
+}
+
+// modulePathFromRemote turns a git remote URL into a module path, for example
+// git@github.com:org/repo.git or https://github.com/org/repo into
+// github.com/org/repo. It returns "" for a URL it can't make sense of.
+func modulePathFromRemote(remote string) string {
+	var host, path string
+	if strings.Contains(remote, "://") {
+		u, err := url.Parse(remote)
+		if err != nil {
+			return ""
+		}
+		host, path = u.Hostname(), u.Path
+	} else {
+		// scp-like syntax: [user@]host:path
+		var ok bool
+		if host, path, ok = strings.Cut(remote, ":"); !ok {
+			return ""
+		}
+		if _, h, hasUser := strings.Cut(host, "@"); hasUser {
+			host = h
+		}
+	}
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	if host == "" || path == "" {
+		return ""
+	}
+	return host + "/" + path
 }
