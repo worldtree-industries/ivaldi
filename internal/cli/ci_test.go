@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/worldtree-industries/ivaldi/internal/scaffold"
+	"github.com/worldtree-industries/ivaldi/internal/testtool"
 )
 
 const ciPath = ".github/workflows/ci.yml"
@@ -103,12 +104,9 @@ func TestInitCIWorkflowTriggersOnMainPullRequestsPushesAndReleaseTags(t *testing
 }
 
 func TestInitCIWorkflowPassesActionlint(t *testing.T) {
-	actionlint, err := exec.LookPath("actionlint")
-	if err != nil {
-		t.Skip("actionlint not on PATH")
-	}
+	actionlint := testtool.Path(t, "actionlint")
 	p := newProject(t)
-	if err = p.run("github.com/acme/widget\n", "init"); err != nil {
+	if err := p.run("github.com/acme/widget\n", "init"); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 
