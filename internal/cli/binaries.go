@@ -223,22 +223,13 @@ func validateNames(dir string, names []string, existing []manifest.Binary) error
 }
 
 // fetchModules fetches each module the new binaries' Kinds need, then tidies
-// the module. A failure doesn't fail the command, since the files are already
-// written: it warns and prints the commands still to run.
+// the module.
 func (s session) fetchModules(plan *binaryPlan) {
 	var cmds []Command
 	for _, mod := range plan.modules {
 		cmds = append(cmds, s.command("go", "get", mod))
 	}
 	cmds = append(cmds, s.command("go", "mod", "tidy"))
-	for i, cmd := range cmds {
-		if _, err := s.exec(cmd, true); err != nil {
-			s.sayf("Warning: %s failed (%v). To finish, run:", cmd, err)
-			for _, rest := range cmds[i:] {
-				s.sayf("  %s", shellQuote(append([]string{rest.Name}, rest.Args...)))
-			}
-			break
-		}
-	}
+	s.runAfterWrite("finish", cmds...)
 	s.sayf("Added %s.", strings.Join(plan.names, ", "))
 }

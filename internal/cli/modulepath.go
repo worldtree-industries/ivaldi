@@ -109,12 +109,7 @@ func goLine(goMod []byte) string {
 	return ""
 }
 
-// raiseGoLine raises go.mod's go line to minGoVersion. A failure is a warning
-// with the command to run by hand, never an error.
+// raiseGoLine raises go.mod's go line to minGoVersion.
 func (s session) raiseGoLine() {
-	cmd := s.command("go", "mod", "edit", "-go="+minGoVersion)
-	if _, err := s.exec(cmd, true); err != nil {
-		s.sayf("Warning: %s failed (%v). To raise the go line, run:", cmd, err)
-		s.sayf("  %s", shellQuote(append([]string{cmd.Name}, cmd.Args...)))
-	}
+	s.runAfterWrite("raise the go line", s.command("go", "mod", "edit", "-go="+minGoVersion))
 }

@@ -241,13 +241,24 @@ func runInit(s *session) error {
 	return nil
 }
 
-// turnOnHooks points the Project's repository at its Managed hooks. A failure
-// is a warning with the command to run by hand, never an error.
+// turnOnHooks points the Project's repository at its Managed hooks.
 func (s session) turnOnHooks() {
-	cmd := s.command("git", "config", "core.hooksPath", scaffold.HooksDir)
-	if _, err := s.exec(cmd, true); err != nil {
-		s.sayf("Warning: %s failed (%v). To turn on the pre-commit hook, run:", cmd, err)
-		s.sayf("  %s", shellQuote(append([]string{cmd.Name}, cmd.Args...)))
+	s.runAfterWrite("turn on the pre-commit hook", s.command("git", "config", "core.hooksPath", scaffold.HooksDir))
+}
+
+// runAfterWrite runs cmds in order, after the files are written. A failure
+// doesn't fail the command, since the files are already there: it warns, and
+// prints the commands still to run to finish what (such as "raise the go
+// line").
+func (s session) runAfterWrite(what string, cmds ...Command) {
+	for i, cmd := range cmds {
+		if _, err := s.exec(cmd, true); err != nil {
+			s.sayf("Warning: %s failed (%v). To %s, run:", cmd, err, what)
+			for _, rest := range cmds[i:] {
+				s.sayf("  %s", shellQuote(append([]string{rest.Name}, rest.Args...)))
+			}
+			return
+		}
 	}
 }
 
