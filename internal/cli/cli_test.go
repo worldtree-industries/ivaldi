@@ -934,18 +934,35 @@ func TestAddHTTPReasksAnInvalidOrUsedPort(t *testing.T) {
 	p.initProject()
 	p.write(".forge.yaml", "version: 1\nbinaries:\n  web:\n    kind: http\n    port: 9090\n")
 
-	if err := p.run("a\nhttp\nabc\n0\n65536\n9090\n9091\n\n", "add"); err != nil {
+	if err := p.run("a\nhttp\nabc\n0\n80\n1023\n65536\n9090\n9091\n\n", "add"); err != nil {
 		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
 	}
 
-	if got := strings.Count(p.out.String(), "Port for a [8080]: "); got != 5 {
-		t.Errorf("expected the port asked 5 times, got %d:\n%s", got, p.out)
+	if got := strings.Count(p.out.String(), "Port for a [8080]: "); got != 7 {
+		t.Errorf("expected the port asked 7 times, got %d:\n%s", got, p.out)
+	}
+	if !strings.Contains(p.out.String(), "from 1024 to 65535") {
+		t.Errorf("expected the allowed range in the message, got:\n%s", p.out)
 	}
 	if !strings.Contains(p.out.String(), "9090 is already used") {
 		t.Errorf("expected a message that 9090 is taken, got:\n%s", p.out)
 	}
 	if !strings.Contains(p.read(".forge.yaml"), "  a:\n    kind: http\n    port: 9091\n") {
 		t.Errorf("expected a on 9091, got:\n%s", p.read(".forge.yaml"))
+	}
+}
+
+func TestAddHTTPAcceptsThePortRangeBounds(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a, b\nhttp\n1024\n\nhttp\n65535\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	want := "  a:\n    kind: http\n    port: 1024\n  b:\n    kind: http\n    port: 65535\n"
+	if !strings.Contains(p.read(".forge.yaml"), want) {
+		t.Errorf("expected a on 1024 and b on 65535, got:\n%s", p.read(".forge.yaml"))
 	}
 }
 

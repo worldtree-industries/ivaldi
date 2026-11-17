@@ -12,7 +12,11 @@ import (
 // firstPort is where the default port search starts.
 const firstPort = 8080
 
-const maxPort = 65535
+// The ports a binary may use: none of the privileged ports below 1024.
+const (
+	minPort = 1024
+	maxPort = 65535
+)
 
 // HTTP returns the http Kind: a Deployable HTTP server built on mjolnir's
 // router, listening on a port unique within the Project.
@@ -68,8 +72,8 @@ var errInvalidPort = errors.New("not a port")
 
 func validatePort(s string, used map[int]bool) error {
 	port, err := strconv.Atoi(s)
-	if err != nil || port < 1 || port > maxPort {
-		return fmt.Errorf("%w: use a number from 1 to %d", errInvalidPort, maxPort)
+	if err != nil || port < minPort || port > maxPort {
+		return fmt.Errorf("%w: use a number from %d to %d", errInvalidPort, minPort, maxPort)
 	}
 	if used[port] {
 		return fmt.Errorf("port %d is already used in %s", port, manifest.FileName)
