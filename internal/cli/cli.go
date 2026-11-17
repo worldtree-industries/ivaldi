@@ -122,7 +122,7 @@ func runInit(ctx context.Context, env Env) error {
 	s.sayf("=== Ivaldi: new Project ===")
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
-	modulePath, err := p.Required("Module path", s.originModulePath())
+	modulePath, err := s.askModulePath(p)
 	if err != nil {
 		return err
 	}
@@ -159,6 +159,19 @@ func runInit(ctx context.Context, env Env) error {
 
 	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
+}
+
+// askModulePath returns the module path of an existing go.mod, or asks for
+// one, defaulting from origin.
+func (s session) askModulePath(p *prompt.Prompter) (string, error) {
+	hasGoMod, err := scaffold.Exists(s.env.Dir, "go.mod")
+	if err != nil {
+		return "", err
+	}
+	if hasGoMod {
+		return readModulePath(s.env.Dir)
+	}
+	return p.Required("Module path", s.originModulePath())
 }
 
 // ensureGitRepository runs git init unless the Project directory is already

@@ -21,7 +21,7 @@ Both commands work on the current directory, take no arguments and ask everythin
 Sets up a new Project in the current directory:
 
 1. Refuses to run if `.forge.yaml` already exists (use `ivaldi add` instead).
-2. Asks for the module path. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
+2. Asks for the module path, unless there's already a `go.mod`, whose module path it uses. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
 3. Asks for binaries, exactly as `ivaldi add` does. A blank answer creates a Project with no binaries yet.
 4. Runs `git init` if the directory isn't a git repository.
 5. Writes the Project files, skipping any file that already exists. It never overwrites anything, so you can run it in a partly set-up repository.

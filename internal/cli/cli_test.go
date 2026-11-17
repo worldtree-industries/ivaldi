@@ -401,7 +401,7 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 		p.write(rel, content)
 	}
 
-	if err := p.run("github.com/acme/widget\n", "init"); err != nil {
+	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 
@@ -415,6 +415,49 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 	}
 	for _, missing := range []string{".forge.yaml", "service/doc.go", "data/doc.go", "models/doc.go"} {
 		p.read(missing)
+	}
+}
+
+func TestInitUsesTheModulePathOfAnExistingGoMod(t *testing.T) {
+	p := newProject(t)
+	p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git\n"}
+	p.write("go.mod", "module example.com/mine\n\ngo 1.27\n")
+
+	if err := p.run("web\nhttp\n\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if strings.Contains(p.out.String(), "Module path") {
+		t.Errorf("expected no module path question with a go.mod, got:\n%s", p.out)
+	}
+	cfg := p.read(".golangci.yml")
+	if !strings.Contains(cfg, "local-prefixes:\n        - example.com/mine\n") {
+		t.Errorf("expected goimports local prefix from go.mod, got:\n%s", cfg)
+	}
+	if !strings.Contains(depguardRule(t, cfg, "api layer"), "- pkg: example.com/mine/data$\n") {
+		t.Errorf("expected depguard rules for the go.mod module path, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "github.com/acme/widget") {
+		t.Errorf("expected nothing derived from origin, got:\n%s", cfg)
+	}
+	if !strings.HasPrefix(p.read("README.md"), "# mine\n") {
+		t.Errorf("expected README titled from go.mod, got:\n%s", p.read("README.md"))
+	}
+	if !strings.Contains(p.read("cmd/web/main.go"), "example.com/mine/") {
+		t.Errorf("expected cmd/web to import the go.mod module's Layers:\n%s", p.read("cmd/web/main.go"))
+	}
+}
+
+func TestInitFailsWithNothingWrittenWhenGoModHasNoModulePath(t *testing.T) {
+	p := newProject(t)
+	p.write("go.mod", "go 1.27\n")
+	before := snapshot(t, p.dir)
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err == nil {
+		t.Fatalf("expected init to fail")
+	}
+	if !maps.Equal(before, snapshot(t, p.dir)) {
+		t.Errorf("expected nothing written")
 	}
 }
 
