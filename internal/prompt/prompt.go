@@ -139,19 +139,17 @@ func (p *Prompter) Choice(message string, options []string) (string, error) {
 	}
 }
 
-// Validated prompts for an answer with a default value (none if empty),
-// re-asking with the validation error while validate rejects it. A blank
-// answer means the default. It returns an error wrapping ErrNoInput if input
-// ends first.
-func (p *Prompter) Validated(message, defaultValue string, validate func(string) error) (string, error) {
+// Validated prompts like Required, then re-asks, printing the reason, while
+// check rejects the answer. It returns an error wrapping ErrNoInput at EOF.
+func (p *Prompter) Validated(message, defaultValue string, check func(string) error) (string, error) {
 	for {
-		answer, err := p.Required(message, defaultValue)
+		input, err := p.Required(message, defaultValue)
 		if err != nil {
 			return "", err
 		}
-		if err = validate(answer); err == nil {
-			return answer, nil
+		if err = check(input); err == nil {
+			return input, nil
 		}
-		fmt.Fprintf(p.out, "%v.\n", err)
+		fmt.Fprintf(p.out, "Invalid answer %q: %v.\n", input, err)
 	}
 }
