@@ -11,6 +11,7 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 - **Comment on an issue**: `gh issue comment <number> --body "..."`
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
+- **Closed by a merged PR**: `Closes #N` lines close issues asynchronously, and can take a while after the merge. Re-check after about 30 seconds before closing any by hand.
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 

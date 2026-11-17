@@ -1,0 +1,5 @@
+#!/bin/sh
+# Pre-commit gate: nothing lands in history that doesn't lint and pass the
+# offline tests. Enable it with `make setup-hooks`.
+set -eu
+make lint test
