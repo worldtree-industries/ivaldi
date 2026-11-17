@@ -108,7 +108,7 @@ var layerRules = []layerRule{
 //
 //	gh api repos/worldtree-industries/workflows/commits/<version> --jq .sha
 const (
-	SharedWorkflowSHA     = "0000000000000000000000000000000000000000" // placeholder until v1.0.0 is tagged
+	SharedWorkflowSHA     = "e27aff84ed75bc3995068bce81b197c7dd6eafff"
 	SharedWorkflowVersion = "v1.0.0"
 )
 

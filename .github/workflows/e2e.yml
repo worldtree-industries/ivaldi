@@ -1,0 +1,46 @@
+# Ivaldi's own end-to-end check, alongside the Managed ci.yml. It builds the
+# real ivaldi binary, generates a Project with one binary of each Kind and
+# requires it to build, vet and pass lint. It also lints the e2e-tagged code and
+# these workflows. The linters are installed and IVALDI_REQUIRE_LINTERS is set,
+# so tests that need them fail here instead of skipping.
+name: e2e
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GOLANGCI_LINT_VERSION: v2.14.0
+  ACTIONLINT_VERSION: v1.7.12
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Install the linters
+        run: |
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$GOLANGCI_LINT_VERSION"
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+      - name: Lint the workflows
+        run: actionlint
+      - name: Lint the e2e-tagged code
+        run: golangci-lint run --build-tags e2e
+      - name: Run the e2e tests
+        env:
+          IVALDI_REQUIRE_LINTERS: '1'
+        run: make e2e

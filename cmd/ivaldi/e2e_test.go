@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/worldtree-industries/ivaldi/internal/testtool"
 )
 
 // The e2e test drives the real ivaldi binary with real git and go, so it
@@ -79,10 +81,7 @@ func TestGeneratedProjectWithEveryKindBuildsAndVets(t *testing.T) {
 	}
 
 	t.Run("lint enforces the layer rules", func(t *testing.T) {
-		lint, err := exec.LookPath("golangci-lint")
-		if err != nil {
-			t.Skip("golangci-lint not on PATH")
-		}
+		lint := testtool.Path(t, "golangci-lint")
 		if out, lintErr := inProject(t, dir, lint, "run"); lintErr != nil {
 			t.Fatalf("golangci-lint failed on the generated Project: %v\n%s", lintErr, out)
 		}
@@ -94,7 +93,7 @@ func TestGeneratedProjectWithEveryKindBuildsAndVets(t *testing.T) {
 			"api/leak.go": "package api\n\nimport \"github.com/acme/widget/data\"\n\n" +
 				"// Rows leaks data into api.\nconst Rows = data.Rows\n",
 		} {
-			if err = os.WriteFile(filepath.Join(dir, path), []byte(src), 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(dir, path), []byte(src), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}
