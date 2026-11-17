@@ -41,7 +41,7 @@ func askHTTP(q *Questions, name string) (Answers, error) {
 		return Answers{}, err
 	}
 	port, _ = strconv.Atoi(answer)
-	answers := Answers{Settings: []manifest.Setting{{Key: "port", Value: port}}}
+	answers := Answers{Settings: []manifest.Setting{{Key: manifest.SettingPort, Value: port}}}
 
 	clientDoc, err := scaffold.LayerDoc(scaffold.LayerClient)
 	if err != nil {
@@ -61,7 +61,7 @@ func askHTTP(q *Questions, name string) (Answers, error) {
 func usedPorts(binaries []manifest.Binary) map[int]bool {
 	used := map[int]bool{}
 	for _, b := range binaries {
-		if port, err := strconv.Atoi(b.Settings["port"]); err == nil {
+		if port, err := strconv.Atoi(b.Settings[manifest.SettingPort]); err == nil {
 			used[port] = true
 		}
 	}

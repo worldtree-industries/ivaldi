@@ -39,6 +39,15 @@ func Exists(dir string) (bool, error) {
 	return scaffold.Exists(dir, FileName)
 }
 
+// The setting keys Ivaldi writes to a binary's entry. Kind Templates read
+// them by the same names, for example {{ .Settings.port }}.
+const (
+	// SettingPort is an http binary's port.
+	SettingPort = "port"
+	// SettingSchedule is a job binary's schedule.
+	SettingSchedule = "schedule"
+)
+
 // Binary is one binary's entry in the Manifest.
 type Binary struct {
 	Name string

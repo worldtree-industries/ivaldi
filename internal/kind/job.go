@@ -41,7 +41,7 @@ func askJob(q *Questions, name string) (Answers, error) {
 	if err != nil {
 		return Answers{}, err
 	}
-	return Answers{Settings: []manifest.Setting{{Key: "schedule", Value: schedule}}}, nil
+	return Answers{Settings: []manifest.Setting{{Key: manifest.SettingSchedule, Value: schedule}}}, nil
 }
 
 // validateSchedule accepts a keyword or a standard 5-field cron expression.
