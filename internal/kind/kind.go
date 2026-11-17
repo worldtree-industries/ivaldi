@@ -64,21 +64,9 @@ type Questions struct {
 	// Binaries are the binaries already in the Manifest, followed by those
 	// planned earlier in this run.
 	Binaries []manifest.Binary
-	// exists reports whether a file is in the Project or planned in this run.
-	exists func(rel string) (bool, error)
-}
-
-// NewQuestions returns the Questions for one add run.
-func NewQuestions(
-	p *prompt.Prompter, binaries []manifest.Binary, exists func(rel string) (bool, error),
-) *Questions {
-	return &Questions{Prompt: p, Binaries: binaries, exists: exists}
-}
-
-// Exists reports whether rel (slash-relative) is already in the Project or
-// planned by an earlier binary in this run.
-func (q *Questions) Exists(rel string) (bool, error) {
-	return q.exists(rel)
+	// Exists reports whether rel (slash-relative) is already in the Project
+	// or planned by an earlier binary in this run.
+	Exists func(rel string) (bool, error)
 }
 
 // Answers are what a Kind's Ask decided about one binary.

@@ -81,7 +81,7 @@ func (b *binaryPlan) add(
 
 	var answers kind.Answers
 	if k.Ask != nil {
-		if answers, err = k.Ask(kind.NewQuestions(p, m.Binaries(), exists), name); err != nil {
+		if answers, err = k.Ask(&kind.Questions{Prompt: p, Binaries: m.Binaries(), Exists: exists}, name); err != nil {
 			return err
 		}
 	}
