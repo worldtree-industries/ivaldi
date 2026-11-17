@@ -130,3 +130,5 @@ Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and 
 - `make test` runs the unit tests. They run offline.
 - `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
 - `make lint` runs golangci-lint. Also run `golangci-lint run --build-tags e2e` to lint the e2e tests.
+- `make setup-hooks` turns on a pre-commit hook that runs `make lint test`.
+- `docs/extending-ivaldi.md` covers adding a Kind and testing at the command seam.
