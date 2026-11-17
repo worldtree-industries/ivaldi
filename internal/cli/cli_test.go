@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -96,7 +98,7 @@ func TestInitDefaultsModulePathFromOriginAndWritesGoMod(t *testing.T) {
 	}
 }
 
-func TestOnlyInitIsOffered(t *testing.T) {
+func TestOnlyInitAndAddAreOffered(t *testing.T) {
 	for _, args := range [][]string{
 		{},
 		{"update"},
@@ -104,6 +106,7 @@ func TestOnlyInitIsOffered(t *testing.T) {
 		{"-p", "github.com/acme", "init"},
 		{"--module-prefix", "github.com/acme", "init"},
 		{"init", "extra"},
+		{"add", "a"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			p := newProject(t)
@@ -112,8 +115,10 @@ func TestOnlyInitIsOffered(t *testing.T) {
 			if !errors.Is(err, cli.ErrUsage) {
 				t.Fatalf("expected usage error, got %v", err)
 			}
-			if !strings.Contains(p.out.String(), "init") || strings.Contains(p.out.String(), "update") {
-				t.Errorf("expected usage offering only init, got:\n%s", p.out)
+			usage := p.out.String()
+			if !strings.Contains(usage, "  init ") || !strings.Contains(usage, "  add ") ||
+				strings.Contains(usage, "update") || strings.Contains(usage, "clobber") {
+				t.Errorf("expected usage offering only init and add, got:\n%s", usage)
 			}
 			if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
 				t.Errorf("expected nothing written, found %d entries", len(entries))
@@ -388,6 +393,7 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 		"Makefile":      "mine\n",
 		"ivaldi.mk":     "mine\n",
 		".golangci.yml": "mine\n",
+		".gitignore":    "mine\n",
 		"README.md":     "# mine\n",
 		"api/doc.go":    "package api // mine\n",
 	}
@@ -409,6 +415,314 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 	}
 	for _, missing := range []string{".forge.yaml", "service/doc.go", "data/doc.go", "models/doc.go"} {
 		p.read(missing)
+	}
+}
+
+func TestAddRefusesWithoutManifest(t *testing.T) {
+	p := newProject(t)
+
+	err := p.run("a\ntool\n", "add")
+	if err == nil || !strings.Contains(err.Error(), "ivaldi init") {
+		t.Fatalf("expected refusal pointing at ivaldi init, got %v", err)
+	}
+	if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
+		t.Errorf("expected nothing written, found %d entries", len(entries))
+	}
+	if len(p.runner.requested) != 0 {
+		t.Errorf("expected no commands, got %+v", p.runner.requested)
+	}
+}
+
+// initProject runs init with module path github.com/acme/widget and no
+// binaries, then clears the output and requested commands.
+func (p *project) initProject() {
+	p.t.Helper()
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		p.t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+	p.out.Reset()
+	p.runner.requested = nil
+}
+
+// goBuild builds ./cmd/<name> in the Project with the real go toolchain and
+// returns the path of the binary.
+func (p *project) goBuild(name string) string {
+	p.t.Helper()
+	bin := filepath.Join(p.t.TempDir(), name)
+	cmd := exec.CommandContext(p.t.Context(), "go", "build", "-o", bin, "./cmd/"+name)
+	cmd.Dir = p.dir
+	cmd.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOFLAGS=-mod=mod")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		p.t.Fatalf("go build ./cmd/%s failed: %v\n%s", name, err, out)
+	}
+	return bin
+}
+
+func TestAddCreatesToolsThatBuildAndPrintAVersion(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a, b\ntool\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	for _, name := range []string{"a", "b"} {
+		main := p.read("cmd/" + name + "/main.go")
+		if !strings.Contains(main, `"flag"`) || !strings.Contains(main, "TODO") ||
+			!strings.Contains(main, "github.com/acme/widget/service") {
+			t.Errorf("cmd/%s/main.go isn't a flag-based Tool with a TODO pointing at service:\n%s", name, main)
+		}
+		out, err := exec.CommandContext(t.Context(), p.goBuild(name), "-version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s -version failed: %v\n%s", name, err, out)
+		}
+		if strings.TrimSpace(string(out)) == "" {
+			t.Errorf("%s -version printed nothing", name)
+		}
+	}
+}
+
+func TestAddAppendsToolsToManifestKeepingHandEdits(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	p.write(".forge.yaml", `# My Project's Manifest.
+version: 1
+binaries:
+  # The public API.
+  web:
+    kind: http
+    port: 9090 # fixed by the load balancer
+    base_image: example.com/base:1
+  nightly:
+    kind: job
+    schedule: daily
+owner: team-a # not something Ivaldi knows about
+`)
+
+	if err := p.run("a, b\ntool\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	want := `# My Project's Manifest.
+version: 1
+binaries:
+  # The public API.
+  web:
+    kind: http
+    port: 9090 # fixed by the load balancer
+    base_image: example.com/base:1
+  nightly:
+    kind: job
+    schedule: daily
+  a:
+    kind: tool
+  b:
+    kind: tool
+owner: team-a # not something Ivaldi knows about
+`
+	if got := p.read(".forge.yaml"); got != want {
+		t.Errorf("manifest after add:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestAddToEmptyManifestWritesBlockStyleEntries(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	manifest := p.read(".forge.yaml")
+	if !strings.HasPrefix(manifest, "# The Ivaldi Manifest") {
+		t.Errorf("expected the header comment kept, got:\n%s", manifest)
+	}
+	if !strings.Contains(manifest, "\nbinaries:\n  a:\n    kind: tool\n") {
+		t.Errorf("expected a block-style entry for a, got:\n%s", manifest)
+	}
+}
+
+func TestAddAbortsOnABadNameWithNothingWritten(t *testing.T) {
+	for name, tc := range map[string]struct {
+		names   string
+		wantErr string
+	}{
+		"invalid name":        {names: "a, Bad_Name", wantErr: `"Bad_Name"`},
+		"starts with digit":   {names: "a, 9lives", wantErr: `"9lives"`},
+		"too long":            {names: "a, " + strings.Repeat("x", 64), wantErr: strings.Repeat("x", 64)},
+		"empty entry":         {names: "a,,b", wantErr: `""`},
+		"duplicate in list":   {names: "a, b, a", wantErr: `"a"`},
+		"already in Manifest": {names: "a, web", wantErr: `"web"`},
+		"cmd dir exists":      {names: "a, legacy", wantErr: `"legacy"`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newProject(t)
+			p.initProject()
+			p.write(".forge.yaml", "version: 1\nbinaries:\n  web:\n    kind: http\n")
+			p.write("cmd/legacy/README", "mine\n")
+			before := snapshot(t, p.dir)
+
+			err := p.run(tc.names+"\ntool\ntool\ntool\n", "add")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("expected an error naming %s, got %v", tc.wantErr, err)
+			}
+			if after := snapshot(t, p.dir); !maps.Equal(before, after) {
+				t.Errorf("expected nothing written, files went from %v to %v", slices.Sorted(maps.Keys(before)),
+					slices.Sorted(maps.Keys(after)))
+			}
+			if strings.Contains(p.out.String(), "Kind of") {
+				t.Errorf("expected no Kind asked before every name is valid, got:\n%s", p.out)
+			}
+			if len(p.runner.requested) != 0 {
+				t.Errorf("expected no commands, got %+v", p.runner.requested)
+			}
+		})
+	}
+}
+
+func TestAddAcceptsAMaximumLengthName(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	name := "a" + strings.Repeat("-9", 31)
+
+	if err := p.run(name+"\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+	p.read("cmd/" + name + "/main.go")
+}
+
+// snapshot returns every file under dir with its content.
+func snapshot(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		b, err := os.ReadFile(path)
+		files[path] = string(b)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
+func TestAddReasksAnUnknownKind(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a\nworker\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if got := strings.Count(p.out.String(), "Kind of a (tool): "); got != 2 {
+		t.Errorf("expected the Kind of a asked twice, got %d times:\n%s", got, p.out)
+	}
+	p.read("cmd/a/main.go")
+}
+
+func TestAddFailsWhenInputEndsBeforeAKindWithNothingWritten(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+	before := snapshot(t, p.dir)
+
+	if err := p.run("a, b\ntool\n", "add"); err == nil {
+		t.Fatalf("expected add to fail")
+	}
+	if !maps.Equal(before, snapshot(t, p.dir)) {
+		t.Errorf("expected nothing written")
+	}
+}
+
+func TestAddRequiresAtLeastOneName(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("\n", "add"); err == nil {
+		t.Fatalf("expected add to fail when input ends without a name")
+	}
+	if got := strings.Count(p.out.String(), "Binary names (comma-separated): "); got != 2 {
+		t.Errorf("expected blank names re-asked, asked %d times:\n%s", got, p.out)
+	}
+}
+
+func TestAddTidiesTheModuleAfterWritingTools(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if !p.runner.requestedLine(p.dir, "go mod tidy") {
+		t.Errorf("expected go mod tidy, requested %+v", p.runner.requested)
+	}
+	for _, c := range p.runner.requested {
+		if c.Name == "go" && len(c.Args) > 0 && c.Args[0] == "get" {
+			t.Errorf("expected nothing fetched for a Tool, got %q", c)
+		}
+	}
+}
+
+func TestInitAsksForBinariesLastAndAcceptsBlank(t *testing.T) {
+	p := newProject(t)
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	out := p.out.String()
+	if !strings.Contains(out, "Binary names (comma-separated, blank for none): ") ||
+		strings.Index(out, "Binary names") < strings.Index(out, "Module path") {
+		t.Errorf("expected init to ask for binaries after the module path, got:\n%s", out)
+	}
+	if _, err := os.Stat(filepath.Join(p.dir, "cmd")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected no cmd directory, stat err = %v", err)
+	}
+	if p.runner.requestedLine(p.dir, "go mod tidy") {
+		t.Errorf("expected no go mod tidy without binaries")
+	}
+}
+
+func TestInitCanAddToolsAndRecordsThemInTheManifest(t *testing.T) {
+	p := newProject(t)
+
+	if err := p.run("github.com/acme/widget\na\ntool\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if !strings.Contains(p.read(".forge.yaml"), "\nbinaries:\n  a:\n    kind: tool\n") {
+		t.Errorf("expected a recorded as a tool, got:\n%s", p.read(".forge.yaml"))
+	}
+	p.goBuild("a")
+	if !p.runner.requestedLine(p.dir, "go mod tidy") {
+		t.Errorf("expected go mod tidy, requested %+v", p.runner.requested)
+	}
+}
+
+func TestInitAbortsOnABadBinaryNameWithNothingWritten(t *testing.T) {
+	p := newProject(t)
+
+	err := p.run("github.com/acme/widget\na, A\ntool\n", "init")
+	if err == nil || !strings.Contains(err.Error(), `"A"`) {
+		t.Fatalf("expected an error naming A, got %v", err)
+	}
+	if entries, _ := os.ReadDir(p.dir); len(entries) != 0 {
+		t.Errorf("expected nothing written, found %d entries", len(entries))
+	}
+}
+
+func TestInitWritesGitignoreForBuildOutput(t *testing.T) {
+	p := newProject(t)
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	if !regexp.MustCompile(`(?m)^/bin/$`).MatchString(p.read(".gitignore")) {
+		t.Errorf("expected .gitignore to ignore bin/, got:\n%s", p.read(".gitignore"))
 	}
 }
 
@@ -513,5 +827,25 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 				t.Errorf("expected no gh calls without a GitHub origin, got %+v", p.runner.requested)
 			}
 		})
+	}
+}
+
+func TestAddNeverTouchesGitHub(t *testing.T) {
+	p := newProject(t)
+	p.runner.out = map[string]string{
+		"git remote get-url origin": "git@github.com:acme/widget.git\n",
+		adminCheck:                  "true\n",
+	}
+	p.initProject()
+
+	if err := p.run("a\ntool\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if p.runner.requestedName("gh") {
+		t.Errorf("expected add to make no GitHub calls, got %+v", p.runner.requested)
+	}
+	if strings.Contains(p.out.String(), "GitHub") {
+		t.Errorf("expected add to say nothing about GitHub, got:\n%s", p.out)
 	}
 }

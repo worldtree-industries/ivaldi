@@ -1,0 +1,34 @@
+// Command {{ .Name }} is a Tool. Install it with
+// go install {{ .ModulePath }}/cmd/{{ .Name }}@latest
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"runtime/debug"
+)
+
+func main() {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Parse()
+
+	if *showVersion {
+		_, _ = fmt.Fprintln(os.Stdout, "{{ .Name }}", version())
+		return
+	}
+
+	// TODO: implement {{ .Name }}. Put the logic in {{ .ModulePath }}/service
+	// and call it from here, so main only parses flags and prints results.
+	_, _ = fmt.Fprintln(os.Stdout, "{{ .Name }}: nothing to do yet")
+}
+
+// version is the module version this binary was built from, as recorded by
+// go install or go build.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok || info.Main.Version == "" {
+		return "(devel)"
+	}
+	return info.Main.Version
+}
