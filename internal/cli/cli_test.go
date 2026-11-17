@@ -52,6 +52,23 @@ func newProject(t *testing.T) *project {
 	return &project{t: t, dir: t.TempDir(), runner: &fakeRunner{}, out: &bytes.Buffer{}}
 }
 
+// script makes the fake runner print stdout for the command line.
+func (p *project) script(line, stdout string) {
+	if p.runner.out == nil {
+		p.runner.out = map[string]string{}
+	}
+	p.runner.out[line] = stdout
+}
+
+const showToplevel = "git rev-parse --show-toplevel"
+
+// inOwnRepo makes the Project directory the top level of a git repo whose
+// origin is origin.
+func (p *project) inOwnRepo(origin string) {
+	p.script(showToplevel, p.dir+"\n")
+	p.script("git remote get-url origin", origin)
+}
+
 func (p *project) run(input string, args ...string) error {
 	p.t.Helper()
 	return cli.Run(context.Background(), cli.Env{
@@ -84,7 +101,7 @@ func (p *project) write(rel, content string) {
 
 func TestInitDefaultsModulePathFromOriginAndWritesGoMod(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git\n"}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
 
 	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
@@ -149,8 +166,8 @@ func TestInitAsksModulePathWithNoDefaultWithoutRemote(t *testing.T) {
 func TestInitFailsWhenInputEndsWithoutModulePath(t *testing.T) {
 	p := newProject(t)
 	p.runner.fail = map[string]error{
-		"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-		"git remote get-url origin":           errors.New("not a git repository"),
+		showToplevel:                errors.New("not a git repository"),
+		"git remote get-url origin": errors.New("not a git repository"),
 	}
 
 	if err := p.run("", "init"); err == nil {
@@ -176,7 +193,7 @@ func TestInitModulePathDefaultHandlesRemoteURLForms(t *testing.T) {
 	} {
 		t.Run(remote, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": remote + "\n"}
+			p.inOwnRepo(remote + "\n")
 
 			if err := p.run("\n", "init"); err != nil {
 				t.Fatalf("init failed: %v", err)
@@ -189,24 +206,27 @@ func TestInitModulePathDefaultHandlesRemoteURLForms(t *testing.T) {
 	}
 }
 
-func TestInitRunsGitInitOnlyOutsideARepository(t *testing.T) {
+func TestInitRunsGitInitUnlessTheProjectIsTheTopLevelOfARepository(t *testing.T) {
 	for name, tc := range map[string]struct {
-		insideRepo  bool
+		// toplevel returns what git rev-parse --show-toplevel prints, or ""
+		// for no repository.
+		toplevel    func(p *project) string
 		wantGitInit bool
 	}{
-		"not a repository":     {insideRepo: false, wantGitInit: true},
-		"already a repository": {insideRepo: true, wantGitInit: false},
+		"not a repository":            {toplevel: func(*project) string { return "" }, wantGitInit: true},
+		"top level of a repository":   {toplevel: func(p *project) string { return p.dir }, wantGitInit: false},
+		"inside a parent repository":  {toplevel: func(p *project) string { return filepath.Dir(p.dir) }, wantGitInit: true},
+		"top level through a symlink": {toplevel: func(p *project) string { return p.symlinked() }, wantGitInit: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git"}
-			if !tc.insideRepo {
-				p.runner.fail = map[string]error{
-					"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-				}
+			if toplevel := tc.toplevel(p); toplevel == "" {
+				p.runner.fail = map[string]error{showToplevel: errors.New("not a git repository")}
+			} else {
+				p.script(showToplevel, toplevel+"\n")
 			}
 
-			if err := p.run("\n", "init"); err != nil {
+			if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
 				t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
 			}
 
@@ -222,11 +242,52 @@ func TestInitRunsGitInitOnlyOutsideARepository(t *testing.T) {
 	}
 }
 
+// symlinked moves the Project directory behind a symlink: p.dir becomes the
+// link, and the real directory is returned.
+func (p *project) symlinked() string {
+	p.t.Helper()
+	target := filepath.Join(p.t.TempDir(), "real")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		p.t.Fatal(err)
+	}
+	link := filepath.Join(p.t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		p.t.Fatal(err)
+	}
+	p.dir = link
+	return target
+}
+
+func TestInitInsideAParentRepositoryIgnoresTheParentsOrigin(t *testing.T) {
+	p := newProject(t)
+	p.script(showToplevel, filepath.Dir(p.dir)+"\n")
+	p.script("git remote get-url origin", "git@github.com:acme/monorepo.git\n")
+	p.script("gh api repos/acme/monorepo --jq .permissions.admin", "true\n")
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	out := p.out.String()
+	if strings.Contains(out, "monorepo") {
+		t.Errorf("expected nothing derived from the parent repository's origin, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Module path: ") {
+		t.Errorf("expected the module path asked with no default, got:\n%s", out)
+	}
+	if p.runner.requestedName("gh") {
+		t.Errorf("expected no gh calls for the parent repository, got %+v", p.runner.requested)
+	}
+	if !strings.Contains(out, "Warning: GitHub settings were not applied") {
+		t.Errorf("expected a warning about GitHub settings, got:\n%s", out)
+	}
+}
+
 func TestInitFailsWhenGitInitFails(t *testing.T) {
 	p := newProject(t)
 	p.runner.fail = map[string]error{
-		"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-		"git init":                            errors.New("boom"),
+		showToplevel: errors.New("not a git repository"),
+		"git init":   errors.New("boom"),
 	}
 
 	if err := p.run("github.com/acme/widget\n", "init"); err == nil || !strings.Contains(err.Error(), "boom") {
@@ -420,7 +481,7 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 
 func TestInitUsesTheModulePathOfAnExistingGoMod(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git\n"}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
 	p.write("go.mod", "module example.com/mine\n\ngo 1.27\n")
 
 	if err := p.run("web\nhttp\n\n\n", "init"); err != nil {
@@ -803,10 +864,8 @@ const adminCheck = "gh api repos/acme/widget --jq .permissions.admin"
 
 func TestInitAppliesGitHubSettingsWhenOriginIsGitHub(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{
-		"git remote get-url origin": "git@github.com:acme/widget.git\n",
-		adminCheck:                  "true\n",
-	}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
+	p.script(adminCheck, "true\n")
 
 	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
@@ -865,7 +924,8 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": tc.origin, adminCheck: tc.admin}
+			p.inOwnRepo(tc.origin)
+			p.script(adminCheck, tc.admin)
 			p.runner.fail = tc.fail
 
 			if err := p.run("github.com/acme/widget\n", "init"); err != nil {
@@ -889,10 +949,8 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 
 func TestAddNeverTouchesGitHub(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{
-		"git remote get-url origin": "git@github.com:acme/widget.git\n",
-		adminCheck:                  "true\n",
-	}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
+	p.script(adminCheck, "true\n")
 	p.initProject()
 
 	if err := p.run("a\ntool\n", "add"); err != nil {
@@ -1123,10 +1181,8 @@ func TestAFailedFetchWarnsWithTheCommandsToRerunAndStillCompletes(t *testing.T) 
 	} {
 		t.Run("init/"+name, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{
-				"git remote get-url origin": "git@github.com:acme/widget.git\n",
-				adminCheck:                  "true\n",
-			}
+			p.inOwnRepo("git@github.com:acme/widget.git\n")
+			p.script(adminCheck, "true\n")
 			p.runner.fail = map[string]error{tc.fail: errors.New("network down")}
 
 			if err := p.run("\nweb\nhttp\n\n\n", "init"); err != nil {

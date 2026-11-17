@@ -79,6 +79,10 @@ func Run(ctx context.Context, env Env, args []string) error {
 type session struct {
 	ctx context.Context //nolint:containedctx // Scoped to a single command run.
 	env Env
+	// ownRepo is set when the Project directory was already the top level of
+	// a git work tree when the command started. Otherwise any repository it's
+	// in belongs to something else, and its origin isn't the Project's.
+	ownRepo bool
 }
 
 func (s session) sayf(format string, a ...any) {
@@ -133,6 +137,7 @@ func runInit(ctx context.Context, env Env) error {
 	}
 
 	s.sayf("=== Ivaldi: new Project ===")
+	s.ownRepo = s.isRepositoryTopLevel()
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
 	modulePath, err := s.askModulePath(p)
@@ -150,8 +155,10 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 
-	if err = s.ensureGitRepository(); err != nil {
-		return err
+	if !s.ownRepo {
+		if err = s.run("git", "init"); err != nil {
+			return err
+		}
 	}
 	manifestFile, err := m.File()
 	if err != nil {
@@ -182,26 +189,45 @@ func (s session) askModulePath(p *prompt.Prompter) (string, error) {
 	if hasGoMod {
 		return readModulePath(s.env.Dir)
 	}
-	return p.Required("Module path", s.originModulePath())
+	return p.Required("Module path", modulePathFromRemote(s.origin()))
 }
 
-// ensureGitRepository runs git init unless the Project directory is already
-// inside a git work tree. It never commits.
-func (s session) ensureGitRepository() error {
-	if _, err := s.output("git", "rev-parse", "--is-inside-work-tree"); err == nil {
-		return nil
+// isRepositoryTopLevel reports whether the Project directory is the top level
+// of a git work tree, not just somewhere inside one.
+func (s session) isRepositoryTopLevel() bool {
+	top, err := s.output("git", "rev-parse", "--show-toplevel")
+	if err != nil || top == "" {
+		return false
 	}
-	return s.run("git", "init")
+	return sameDir(top, s.env.Dir)
 }
 
-// originModulePath derives a module path from the origin remote, or returns ""
-// when there is no usable remote.
-func (s session) originModulePath() string {
+// sameDir reports whether a and b are the same directory, after resolving
+// symlinks.
+func sameDir(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return ra == rb
+}
+
+// origin returns the URL of the Project's origin remote, or "" when it has
+// none. A repository the Project is merely inside isn't the Project's, and one
+// init creates has no remotes, so neither has an origin.
+func (s session) origin() string {
+	if !s.ownRepo {
+		return ""
+	}
 	remote, err := s.output("git", "remote", "get-url", "origin")
 	if err != nil {
 		return ""
 	}
-	return modulePathFromRemote(remote)
+	return remote
 }
 
 // modulePathFromRemote turns a git remote URL into a module path, for example

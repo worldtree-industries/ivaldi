@@ -50,8 +50,7 @@ func ghPut(path string, fields ...string) []string {
 // call fails, it warns and prints the commands to run by hand. It never fails
 // init.
 func (s session) applyGitHubSettings() {
-	remote, _ := s.output("git", "remote", "get-url", "origin")
-	repo, ok := githubRepo(remote)
+	repo, ok := githubRepo(s.origin())
 	if !ok {
 		s.warnGitHubSettings("origin is not a GitHub repository", "OWNER/REPO")
 		return
