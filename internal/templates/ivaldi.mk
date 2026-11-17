@@ -7,11 +7,12 @@
 #   build         build everything, and each binary into bin/
 #   run-<name>    run cmd/<name>
 #   install       go install every binary
+#   setup-hooks   turn on the pre-commit hook (.githooks) in this clone
 
 BINARIES := $(sort $(patsubst cmd/%/,%,$(dir $(wildcard cmd/*/main.go))))
 
 .DEFAULT_GOAL := build
-.PHONY: lint test build install
+.PHONY: lint test build install setup-hooks
 
 lint:
 	golangci-lint run ./...
@@ -34,3 +35,7 @@ ifneq ($(BINARIES),)
 else
 	@echo "No binaries in cmd/ to install."
 endif
+
+# core.hooksPath isn't cloned, so each fresh clone runs this once.
+setup-hooks:
+	git config core.hooksPath .githooks

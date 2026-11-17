@@ -21,6 +21,7 @@ import (
 const (
 	dirPerm  = 0o755
 	filePerm = 0o644
+	execPerm = 0o755
 )
 
 // File is one file Ivaldi writes into a Project.
@@ -33,6 +34,8 @@ type File struct {
 	// Unmanaged: written once, then owned by the user. At init both kinds are
 	// written only if missing.
 	Managed bool
+	// Executable makes the file executable, for scripts such as git hooks.
+	Executable bool
 }
 
 // Exists reports whether rel exists under the Project directory.
@@ -115,6 +118,13 @@ const (
 // CIPath is where the Managed CI caller workflow lives.
 const CIPath = ".github/workflows/ci.yml"
 
+// HooksDir is the Project's git hooks directory, which init points
+// core.hooksPath at. PreCommitHookPath is the Managed pre-commit hook in it.
+const (
+	HooksDir          = ".githooks"
+	PreCommitHookPath = HooksDir + "/pre-commit"
+)
+
 // Skeleton returns the files of a new Project with no binaries.
 func Skeleton(modulePath string) ([]File, error) {
 	files := []File{
@@ -122,6 +132,7 @@ func Skeleton(modulePath string) ([]File, error) {
 		{Path: "Makefile", Content: templates.Makefile},
 		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
 		{Path: CIPath, Content: ciWorkflow(), Managed: true},
+		{Path: PreCommitHookPath, Content: templates.PreCommit, Managed: true, Executable: true},
 		{Path: ".gitignore", Content: templates.Gitignore},
 	}
 	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
@@ -202,5 +213,9 @@ func writeIfMissing(dir string, out io.Writer, f File) error {
 	if err = os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return err
 	}
-	return os.WriteFile(path, f.Content, filePerm)
+	perm := fs.FileMode(filePerm)
+	if f.Executable {
+		perm = execPerm
+	}
+	return os.WriteFile(path, f.Content, perm)
 }

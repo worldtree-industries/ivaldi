@@ -80,6 +80,11 @@ func TestGeneratedProjectWithEveryKindBuildsAndVets(t *testing.T) {
 		}
 	}
 
+	// Before the layer-rule check, which leaves a lint failure behind.
+	t.Run("the pre-commit hook gates commits", func(t *testing.T) {
+		testPreCommitHook(t, dir)
+	})
+
 	t.Run("lint enforces the layer rules", func(t *testing.T) {
 		lint := testtool.Path(t, "golangci-lint")
 		if out, lintErr := inProject(t, dir, lint, "run"); lintErr != nil {
@@ -103,4 +108,67 @@ func TestGeneratedProjectWithEveryKindBuildsAndVets(t *testing.T) {
 			t.Errorf("expected depguard to reject api importing data, got %v:\n%s", lintErr, out)
 		}
 	})
+}
+
+// git runs git in the Project and fails the test if it fails.
+func git(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	out, err := inProject(t, dir, "git", args...)
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return strings.TrimSpace(out)
+}
+
+// testPreCommitHook checks that init turned on the Managed hook, that a clean
+// Project commits through it, and that a lint failure blocks the commit. It
+// leaves the Project as it found it, apart from the commit.
+func testPreCommitHook(t *testing.T, dir string) {
+	t.Helper()
+	// The hook runs golangci-lint from PATH, so it must be there.
+	testtool.Path(t, "golangci-lint")
+
+	if got := git(t, dir, "config", "--local", "core.hooksPath"); got != ".githooks" {
+		t.Fatalf("expected init to set core.hooksPath to .githooks, got %q", got)
+	}
+	// Only this temp repository's config: a commit needs an identity, and the
+	// user's own signing setup mustn't get in the way.
+	git(t, dir, "config", "--local", "user.name", "Ivaldi e2e")
+	git(t, dir, "config", "--local", "user.email", "e2e@example.invalid")
+	git(t, dir, "config", "--local", "commit.gpgsign", "false")
+
+	git(t, dir, "add", "-A")
+	out, err := inProject(t, dir, "git", "commit", "-q", "-m", "Initial commit")
+	if err != nil {
+		t.Fatalf("expected the generated Project to commit through the hook: %v\n%s", err, out)
+	}
+	// make echoes each recipe line, so this shows the hook ran both.
+	for _, want := range []string{"golangci-lint run ./...", "go test ./..."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected the commit to run %q through the hook, got:\n%s", want, out)
+		}
+	}
+	head := git(t, dir, "rev-parse", "HEAD")
+
+	// An unused unexported const is a lint failure in every lint config.
+	bad := filepath.Join(dir, "models", "unused.go")
+	if err = os.WriteFile(bad, []byte("package models\n\nconst unused = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "add", "-A")
+	out, err = inProject(t, dir, "git", "commit", "-q", "-m", "Lint failure")
+	if err == nil {
+		t.Errorf("expected the hook to block a commit with a lint failure, got:\n%s", out)
+	}
+	if !strings.Contains(out, "const unused is unused") {
+		t.Errorf("expected the lint failure in the commit's output, got:\n%s", out)
+	}
+	if got := git(t, dir, "rev-parse", "HEAD"); got != head {
+		t.Errorf("expected HEAD to stay at %s, got %s", head, got)
+	}
+
+	if err = os.Remove(bad); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "add", "-A")
 }

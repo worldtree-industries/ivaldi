@@ -25,7 +25,8 @@ Sets up a new Project in the current directory:
 3. Asks for binaries, exactly as `ivaldi add` does. A blank answer creates a Project with no binaries yet.
 4. Runs `git init` unless the directory is already the top level of a git repository. A directory inside another repository (a subdirectory of a monorepo, say) gets its own repository, and the outer repository's `origin` is never used for the module path or GitHub settings.
 5. Writes the Project files, skipping any file that already exists. It never overwrites anything, so you can run it in a partly set-up repository.
-6. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
+6. Turns on the pre-commit hook with `git config core.hooksPath .githooks`, in the Project's own repository only (never a repository it's inside). If that fails, `init` still succeeds: it warns and prints the command to run later.
+7. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
 
 ### `ivaldi add`
 
@@ -91,7 +92,8 @@ Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unl
 
 **Managed files** are identical in every Project and you shouldn't edit them. Ivaldi writes them at `init`; keeping them current afterwards is a separate system's job.
 
-- `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>` and `install`. Binaries are discovered from `cmd/` each time make runs.
+- `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>`, `install` and `setup-hooks`. Binaries are discovered from `cmd/` each time make runs.
+- `.githooks/pre-commit`: runs `make lint test` before every commit. It needs golangci-lint v2 on `PATH`, and says how to install it if it's missing. `git commit --no-verify` skips it. `core.hooksPath` isn't cloned, so run `make setup-hooks` once in each fresh clone.
 - `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets and runs with read-only permissions.
 
 **Unmanaged files** are written once, if missing, and then belong to you. Ivaldi never touches them again.
@@ -125,10 +127,10 @@ This needs `origin` to point at GitHub and `gh` to be authenticated with admin r
 
 ## Developing Ivaldi
 
-Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` and `ivaldi.mk` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
+Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml`, `ivaldi.mk` and `.githooks/pre-commit` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
 
 - `make test` runs the unit tests. They run offline.
-- `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
+- `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint, and to commit through its pre-commit hook, which must block a lint failure. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
 - `make lint` runs golangci-lint. Also run `golangci-lint run --build-tags e2e` to lint the e2e tests.
 - `make setup-hooks` turns on a pre-commit hook that runs `make lint test`.
 - `docs/extending-ivaldi.md` covers adding a Kind and testing at the command seam.

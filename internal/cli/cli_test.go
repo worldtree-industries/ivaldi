@@ -374,10 +374,14 @@ func TestInitWritesMakefileIncludingManagedSharedMakeFile(t *testing.T) {
 	if !strings.Contains(shared, "Managed by Ivaldi") {
 		t.Errorf("expected the shared make file to say it is Managed, got:\n%s", shared)
 	}
-	for _, target := range []string{"lint", "test", "build", "run-%", "install"} {
+	for _, target := range []string{"lint", "test", "build", "run-%", "install", "setup-hooks"} {
 		if !regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:`).MatchString(shared) {
 			t.Errorf("expected target %s in the shared make file, got:\n%s", target, shared)
 		}
+	}
+	// core.hooksPath isn't cloned, so a fresh clone turns the hook on with this.
+	if !strings.Contains(shared, "\nsetup-hooks:\n\tgit config core.hooksPath .githooks\n") {
+		t.Errorf("expected setup-hooks to set core.hooksPath to .githooks, got:\n%s", shared)
 	}
 }
 
@@ -440,7 +444,9 @@ func TestInitWritesReadmeSkeleton(t *testing.T) {
 	if !strings.Contains(readme, "TODO") {
 		t.Errorf("expected a description TODO in README, got:\n%s", readme)
 	}
-	for _, target := range []string{"make lint", "make test", "make build", "make run-<name>", "make install"} {
+	for _, target := range []string{
+		"make lint", "make test", "make build", "make run-<name>", "make install", "make setup-hooks",
+	} {
 		if !strings.Contains(readme, target) {
 			t.Errorf("expected README to list %q, got:\n%s", target, readme)
 		}
@@ -457,6 +463,7 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 		".gitignore":    "mine\n",
 		"README.md":     "# mine\n",
 		"api/doc.go":    "package api // mine\n",
+		hookPath:        "#!/bin/sh\n# mine\n",
 	}
 	for rel, content := range mine {
 		p.write(rel, content)

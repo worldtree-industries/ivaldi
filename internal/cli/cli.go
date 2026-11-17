@@ -201,12 +201,25 @@ func runInit(s *session) error {
 	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
 		return err
 	}
+	// The Project directory is its own repository's top level by now, so this
+	// never touches the config of a repository it's merely inside.
+	s.turnOnHooks()
 	if !plan.empty() {
 		s.fetchModules(plan)
 	}
 
 	s.applyGitHubSettings()
 	return nil
+}
+
+// turnOnHooks points the Project's repository at its Managed hooks. A failure
+// is a warning with the command to run by hand, never an error.
+func (s session) turnOnHooks() {
+	cmd := s.command("git", "config", "core.hooksPath", scaffold.HooksDir)
+	if _, err := s.exec(cmd, true); err != nil {
+		s.sayf("Warning: %s failed (%v). To turn on the pre-commit hook, run:", cmd, err)
+		s.sayf("  %s", shellQuote(append([]string{cmd.Name}, cmd.Args...)))
+	}
 }
 
 // isRepositoryTopLevel reports whether the Project directory is the top level
