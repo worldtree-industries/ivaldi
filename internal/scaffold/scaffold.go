@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"text/template"
 
 	"github.com/worldtree-industries/ivaldi/internal/templates"
@@ -100,12 +101,27 @@ var layerRules = []layerRule{
 	},
 }
 
+// The release of worldtree-industries/workflows that the Managed CI workflow
+// calls. The workflow is pinned by SharedWorkflowSHA, so a moved tag can't
+// change what runs; SharedWorkflowVersion is only the comment beside it.
+// Update both together, from:
+//
+//	gh api repos/worldtree-industries/workflows/commits/<version> --jq .sha
+const (
+	SharedWorkflowSHA     = "0000000000000000000000000000000000000000" // placeholder until v1.0.0 is tagged
+	SharedWorkflowVersion = "v1.0.0"
+)
+
+// CIPath is where the Managed CI caller workflow lives.
+const CIPath = ".github/workflows/ci.yml"
+
 // Skeleton returns the files of a new Project with no binaries.
 func Skeleton(modulePath string) ([]File, error) {
 	files := []File{
 		{Path: "go.mod", Content: fmt.Appendf(nil, "module %s\n\ngo 1.27\n", modulePath)},
 		{Path: "Makefile", Content: templates.Makefile},
 		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
+		{Path: CIPath, Content: ciWorkflow(), Managed: true},
 		{Path: ".gitignore", Content: templates.Gitignore},
 	}
 	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
@@ -151,6 +167,13 @@ func Write(dir string, out io.Writer, files []File) error {
 		}
 	}
 	return nil
+}
+
+func ciWorkflow() []byte {
+	return []byte(strings.NewReplacer(
+		"__SHARED_WORKFLOW_SHA__", SharedWorkflowSHA,
+		"__SHARED_WORKFLOW_VERSION__", SharedWorkflowVersion,
+	).Replace(templates.CI))
 }
 
 func render(name, content string, data any) ([]byte, error) {
