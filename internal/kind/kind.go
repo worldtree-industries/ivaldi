@@ -17,6 +17,10 @@ import (
 	"github.com/worldtree-industries/ivaldi/internal/templates"
 )
 
+// mjolnirModule is the go get query for the framework the Deployable Kinds'
+// Templates use.
+const mjolnirModule = "github.com/dfryer1193/mjolnir@latest"
+
 // Kind is one built-in Kind.
 type Kind struct {
 	// Name is the Kind as written in the Manifest and offered by add.
