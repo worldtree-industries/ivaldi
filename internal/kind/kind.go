@@ -31,7 +31,7 @@ type Kind struct {
 
 // All returns every built-in Kind, in the order add offers them.
 func All() []Kind {
-	return []Kind{Tool()}
+	return []Kind{HTTP(), Tool()}
 }
 
 // Names returns the names of every built-in Kind, in the order add offers them.

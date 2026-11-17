@@ -38,9 +38,6 @@ var Readme string
 //go:embed golangci.yml.tmpl
 var GolangCI string
 
-//go:embed main_http.tmpl
-var MainHTTP string
-
 // Kinds holds each Kind's main Template, as kinds/<kind>.go.tmpl.
 //
 //go:embed kinds
