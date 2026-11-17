@@ -25,6 +25,15 @@ var binaryName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // binaryPlan is everything the binaries prompt decided, before anything is
 // written.
 type binaryPlan struct {
+	prompt     *prompt.Prompter
+	dir        string
+	modulePath string
+	// manifest gets each planned binary added to it.
+	manifest *manifest.Manifest
+	// planned are files that will be written in the same run, and count as
+	// existing.
+	planned []scaffold.File
+
 	names []string
 	// files are each binary's main and any extra files its Kind needs.
 	files []scaffold.File
@@ -48,32 +57,32 @@ func planBinaries(
 	if err != nil {
 		return nil, err
 	}
-	plan := &binaryPlan{}
-	exists := func(rel string) (bool, error) {
-		if slices.ContainsFunc(planned, func(f scaffold.File) bool { return f.Path == rel }) ||
-			slices.ContainsFunc(plan.files, func(f scaffold.File) bool { return f.Path == rel }) {
-			return true, nil
-		}
-		return scaffold.Exists(dir, rel)
-	}
 	if err = validateNames(dir, names, m.Binaries()); err != nil {
 		return nil, err
 	}
 
+	plan := &binaryPlan{prompt: p, dir: dir, modulePath: modulePath, manifest: m, planned: planned}
 	for _, name := range names {
-		if err = plan.add(p, name, modulePath, m, exists); err != nil {
+		if err = plan.add(name); err != nil {
 			return nil, err
 		}
 	}
 	return plan, nil
 }
 
-// add asks name's Kind and the Kind's follow-up questions, adds it to m, and
-// plans its files.
-func (b *binaryPlan) add(
-	p *prompt.Prompter, name, modulePath string, m *manifest.Manifest, exists func(string) (bool, error),
-) error {
-	kindName, err := p.Choice("Kind of "+name, kind.Names())
+// exists reports whether rel is in the Project, or planned in this run.
+func (b *binaryPlan) exists(rel string) (bool, error) {
+	isRel := func(f scaffold.File) bool { return f.Path == rel }
+	if slices.ContainsFunc(b.planned, isRel) || slices.ContainsFunc(b.files, isRel) {
+		return true, nil
+	}
+	return scaffold.Exists(b.dir, rel)
+}
+
+// add asks name's Kind and the Kind's follow-up questions, adds it to the
+// Manifest, and plans its files.
+func (b *binaryPlan) add(name string) error {
+	kindName, err := b.prompt.Choice("Kind of "+name, kind.Names())
 	if err != nil {
 		return err
 	}
@@ -81,7 +90,8 @@ func (b *binaryPlan) add(
 
 	var answers kind.Answers
 	if k.Ask != nil {
-		if answers, err = k.Ask(&kind.Questions{Prompt: p, Binaries: m.Binaries(), Exists: exists}, name); err != nil {
+		q := &kind.Questions{Prompt: b.prompt, Binaries: b.manifest.Binaries(), Exists: b.exists}
+		if answers, err = k.Ask(q, name); err != nil {
 			return err
 		}
 	}
@@ -89,11 +99,11 @@ func (b *binaryPlan) add(
 	for _, s := range answers.Settings {
 		settings[s.Key] = s.Value
 	}
-	main, err := k.Main(kind.Data{Name: name, ModulePath: modulePath, Settings: settings})
+	main, err := k.Main(kind.Data{Name: name, ModulePath: b.modulePath, Settings: settings})
 	if err != nil {
 		return err
 	}
-	if err = m.Add(name, k.Name, answers.Settings); err != nil {
+	if err = b.manifest.Add(name, k.Name, answers.Settings); err != nil {
 		return err
 	}
 	b.names = append(b.names, name)
