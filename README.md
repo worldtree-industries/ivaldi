@@ -125,7 +125,7 @@ This needs `origin` to point at GitHub and `gh` to be authenticated with admin r
 
 ## Developing Ivaldi
 
-Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` is the one `init` generates. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
+Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` and `ivaldi.mk` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
 
 - `make test` runs the unit tests. They run offline.
 - `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).

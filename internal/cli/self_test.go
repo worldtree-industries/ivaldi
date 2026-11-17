@@ -3,6 +3,7 @@ package cli_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/worldtree-industries/ivaldi/internal/manifest"
@@ -22,6 +23,32 @@ func TestIvaldiCIIsTheCallerWorkflowInitWrites(t *testing.T) {
 	}
 	if string(own) != p.read(ciPath) {
 		t.Errorf("expected Ivaldi's %s to be exactly the one init writes; copy it from a fresh init", ciPath)
+	}
+}
+
+func TestIvaldiSharedMakeFileIsTheOneInitWrites(t *testing.T) {
+	p := newProject(t)
+	if err := p.run("github.com/worldtree-industries/ivaldi\n", "init"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+	own, err := os.ReadFile(filepath.Join(ivaldiRoot, "ivaldi.mk"))
+	if err != nil {
+		t.Fatalf("expected Ivaldi to have its own ivaldi.mk: %v", err)
+	}
+	if string(own) != p.read("ivaldi.mk") {
+		t.Errorf("expected Ivaldi's ivaldi.mk to be exactly the one init writes; copy it from a fresh init")
+	}
+}
+
+func TestIvaldiMakefileIncludesTheSharedMakeFileAndKeepsE2E(t *testing.T) {
+	own, err := os.ReadFile(filepath.Join(ivaldiRoot, "Makefile"))
+	if err != nil {
+		t.Fatalf("expected Ivaldi to have its own Makefile: %v", err)
+	}
+	for _, want := range []string{"\ninclude ivaldi.mk\n", "\ne2e:\n"} {
+		if !strings.Contains(string(own), want) {
+			t.Errorf("expected Ivaldi's Makefile to contain %q, got:\n%s", want, own)
+		}
 	}
 }
 
