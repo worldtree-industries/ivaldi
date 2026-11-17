@@ -1,5 +1,3 @@
-module ivaldi
+module github.com/worldtree-industries/ivaldi
 
-go 1.26.1
-
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+go 1.27

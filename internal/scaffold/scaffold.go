@@ -1,17 +1,19 @@
+// Package scaffold writes Project files under an explicit Project directory.
+// It never reads the process's working directory, stdin or stdout, and never
+// runs external processes: the command layer does that through its runner.
 package scaffold
 
 import (
 	"bytes"
-	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"text/template"
-	"time"
 
-	"ivaldi/internal/merge"
-	"ivaldi/internal/templates"
+	"github.com/worldtree-industries/ivaldi/internal/templates"
 )
 
 type Binary struct {
@@ -27,83 +29,90 @@ type ProjectConfig struct {
 }
 
 const (
-	modeClobber    = "clobber"
-	commandTimeout = 30 * time.Second
+	dirPerm  = 0o755
+	filePerm = 0o644
 )
 
-func InitGoMod(modulePath string) error {
-	if _, err := os.Stat("go.mod"); err == nil {
-		//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-		fmt.Println("go.mod already exists, skipping init")
-		return nil
+// Exists reports whether rel exists under the Project directory.
+func Exists(dir, rel string) (bool, error) {
+	_, err := os.Stat(filepath.Join(dir, rel))
+	if err == nil {
+		return true, nil
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", "mod", "init", modulePath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return false, err
 }
 
-func CreateDirectories(binaries []Binary) error {
+// CreateDirectories creates the directories each binary needs.
+func CreateDirectories(dir string, binaries []Binary) error {
 	dirs := []string{"internal"}
 	for _, bin := range binaries {
 		dirs = append(dirs, filepath.Join("cmd", bin.Name))
 	}
 
-	for _, dir := range dirs {
-		//nolint:gosec // We are creating directories in the current working directory, so this is safe
-		if err := os.MkdirAll(dir, 0755); err != nil {
+	for _, d := range dirs {
+		if err := os.MkdirAll(filepath.Join(dir, d), dirPerm); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func WriteMainFiles(config *ProjectConfig) error {
-	for _, bin := range binariesToTemplateData(config) {
-		path := filepath.Join("cmd", bin.Name, "main.go")
-		if _, err := os.Stat(path); err == nil {
-			//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-			fmt.Printf("File %s already exists, skipping...\n", path)
-			continue
-		}
-
+// WriteMainFiles writes each binary's main package, skipping existing files.
+func WriteMainFiles(dir string, out io.Writer, config *ProjectConfig) error {
+	for _, bin := range config.Binaries {
 		var tmplContent string
 		switch bin.Type {
 		case "http":
 			tmplContent = templates.MainHTTP
 		case "worker":
 			tmplContent = templates.MainWorker
-		case "cli":
-			tmplContent = templates.MainCLI
 		case "interactive":
 			tmplContent = templates.MainInteractive
 		default:
 			tmplContent = templates.MainCLI
 		}
 
-		tmpl, err := template.New("main").Parse(tmplContent)
+		content, err := generateTemplate("main", tmplContent, map[string]string{
+			"ModulePath": config.ModulePath,
+			"BinaryName": bin.Name,
+		})
 		if err != nil {
 			return err
 		}
 
-		var buf bytes.Buffer
-		if err = tmpl.Execute(&buf, map[string]string{
-			"ModulePath": config.ModulePath,
-			"BinaryName": bin.Name,
-		}); err != nil {
-			return err
-		}
-
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		if err = os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		if err = writeIfMissing(dir, out, filepath.Join("cmd", bin.Name, "main.go"), content); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// WriteTooling writes the Makefile, lint config and, if requested, CI workflow,
+// skipping any that already exist.
+func WriteTooling(dir string, out io.Writer, config *ProjectConfig) error {
+	makefileContent, err := generateTemplate("makefile", templates.Makefile, config)
+	if err != nil {
+		return err
+	}
+	if err = writeIfMissing(dir, out, "Makefile", makefileContent); err != nil {
+		return err
+	}
+
+	if err = writeIfMissing(dir, out, ".golangci.yml", []byte(templates.GolangCI)); err != nil {
+		return err
+	}
+
+	if !config.SetupCI {
+		return nil
+	}
+	ciContent, err := generateTemplate("ci", templates.CI, config)
+	if err != nil {
+		return err
+	}
+	return writeIfMissing(dir, out, filepath.Join(".github", "workflows", "ci.yml"), ciContent)
 }
 
 func generateTemplate(name, content string, data any) ([]byte, error) {
@@ -119,90 +128,19 @@ func generateTemplate(name, content string, data any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func WriteTooling(config *ProjectConfig, mode string) error {
-	// mode: "init", "update", "clobber"
-
-	// 1. Makefile
-	makefileContent, err := generateTemplate("makefile", templates.Makefile, config)
+func writeIfMissing(dir string, out io.Writer, rel string, content []byte) error {
+	exists, err := Exists(dir, rel)
 	if err != nil {
 		return err
 	}
-	if err = writeOrMerge("Makefile", makefileContent, mode, merge.Makefile); err != nil {
+	if exists {
+		_, err = fmt.Fprintf(out, "File %s already exists, skipping...\n", rel)
 		return err
 	}
 
-	// 2. golangci.yml
-	if err = writeOrMerge(".golangci.yml", []byte(templates.GolangCI), mode, merge.YAML); err != nil {
+	path := filepath.Join(dir, rel)
+	if err = os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return err
 	}
-
-	// 3. CI
-	if config.SetupCI || mode == modeClobber {
-		var ciContent []byte
-		ciContent, err = generateTemplate("ci", templates.CI, config)
-		if err != nil {
-			return err
-		}
-		//nolint:gosec // We are creating directories in the current working directory, so this is safe
-		if err = os.MkdirAll(filepath.Join(".github", "workflows"), 0755); err != nil {
-			return err
-		}
-
-		// For CI, we generally don't merge, just replace if clobber, or skip if init and exists
-		ciPath := filepath.Join(".github", "workflows", "ci.yml")
-		if mode == modeClobber {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			_ = os.WriteFile(ciPath, ciContent, 0644)
-		} else if _, err = os.Stat(ciPath); os.IsNotExist(err) {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			_ = os.WriteFile(ciPath, ciContent, 0644)
-		}
-	}
-
-	return nil
-}
-
-func writeOrMerge(path string, srcContent []byte, mode string, mergeFunc func(dst, src []byte) ([]byte, error)) error {
-	if mode == modeClobber {
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		return os.WriteFile(path, srcContent, 0644)
-	}
-
-	existing, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			return os.WriteFile(path, srcContent, 0644)
-		}
-		return err
-	}
-
-	if mode == "update" {
-		var merged []byte
-		merged, err = mergeFunc(existing, srcContent)
-		if err != nil {
-			return err
-		}
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		return os.WriteFile(path, merged, 0644)
-	}
-
-	// init mode: skip if exists
-	//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-	fmt.Printf("File %s already exists, skipping...\n", path)
-	return nil
-}
-
-func binariesToTemplateData(config *ProjectConfig) []Binary {
-	return config.Binaries
-}
-
-func RunGoModTidy() error {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", "mod", "tidy")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return os.WriteFile(path, content, filePerm)
 }
