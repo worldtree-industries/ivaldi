@@ -617,7 +617,7 @@ func TestAddReasksAnUnknownKind(t *testing.T) {
 		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
 	}
 
-	if got := strings.Count(p.out.String(), "Kind of a (tool): "); got != 2 {
+	if got := strings.Count(p.out.String(), "Kind of a (job, tool): "); got != 2 {
 		t.Errorf("expected the Kind of a asked twice, got %d times:\n%s", got, p.out)
 	}
 	p.read("cmd/a/main.go")
