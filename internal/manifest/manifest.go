@@ -46,7 +46,14 @@ const (
 	SettingPort = "port"
 	// SettingSchedule is a job binary's schedule.
 	SettingSchedule = "schedule"
+	// SettingBuild is how a Deployable is built: BuildDockerfile builds it
+	// from cmd/<name>/Dockerfile instead of with ko.
+	SettingBuild = "build"
 )
+
+// BuildDockerfile is the SettingBuild value for a binary built from its own
+// cmd/<name>/Dockerfile.
+const BuildDockerfile = "dockerfile"
 
 // Binary is one binary's entry in the Manifest.
 type Binary struct {

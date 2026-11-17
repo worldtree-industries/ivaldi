@@ -51,7 +51,7 @@ var ErrUsage = errors.New("usage")
 const usage = `Usage: ivaldi <command>
 
 Commands:
-  init     Set up a new Project in the current directory
+  init     Set up a Project in the current directory, new or with existing code
   add      Add binaries to the Project in the current directory
 `
 
@@ -170,6 +170,11 @@ func (s session) output(name string, args ...string) (string, error) {
 
 func runInit(s *session) error {
 	s.ownRepo = s.isRepositoryTopLevel()
+	found, err := discover(s.env.Dir)
+	if err != nil {
+		return err
+	}
+	s.warn(found)
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
 	modulePath, err := s.askModulePath()
@@ -182,7 +187,26 @@ func runInit(s *session) error {
 		return err
 	}
 	m := manifest.Empty()
-	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, files, true)
+	plan := newBinaryPlan(s.prompt, s.env.Out, s.env.Dir, modulePath, m, files)
+	if len(found.binaries) > 0 {
+		s.sayf("Found existing binaries in cmd/: %s. Their code is left as it is.", found.names())
+	}
+	for _, d := range found.binaries {
+		if err = plan.record(d); err != nil {
+			return err
+		}
+	}
+	if err = plan.askNew(true); err != nil {
+		return err
+	}
+	ourHook, err := s.askOverwrites(files)
+	if err != nil {
+		return err
+	}
+	if err = s.planGitignore(files); err != nil {
+		return err
+	}
+	raiseGoLine, err := s.askGoLine()
 	if err != nil {
 		return err
 	}
@@ -201,9 +225,14 @@ func runInit(s *session) error {
 	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
 		return err
 	}
+	if raiseGoLine {
+		s.raiseGoLine()
+	}
 	// The Project directory is its own repository's top level by now, so this
 	// never touches the config of a repository it's merely inside.
-	s.turnOnHooks()
+	if ourHook {
+		s.turnOnHooks()
+	}
 	if !plan.empty() {
 		s.fetchModules(plan)
 	}
@@ -270,7 +299,7 @@ func runAdd(s *session) error {
 		return err
 	}
 
-	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, nil, false)
+	plan, err := planBinaries(s.prompt, s.env.Out, s.env.Dir, modulePath, m, nil, false)
 	if err != nil {
 		return err
 	}

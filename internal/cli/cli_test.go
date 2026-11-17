@@ -460,7 +460,6 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 		"Makefile":      "mine\n",
 		"ivaldi.mk":     "mine\n",
 		".golangci.yml": "mine\n",
-		".gitignore":    "mine\n",
 		"README.md":     "# mine\n",
 		"api/doc.go":    "package api // mine\n",
 		hookPath:        "#!/bin/sh\n# mine\n",

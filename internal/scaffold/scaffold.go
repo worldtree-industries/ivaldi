@@ -32,10 +32,13 @@ type File struct {
 	// Managed marks a Managed file: identical in every Project, never edited by
 	// users, and kept current by a separate system. Any other file is
 	// Unmanaged: written once, then owned by the user. At init both kinds are
-	// written only if missing.
+	// written only if missing, unless the user agrees to overwrite them.
 	Managed bool
 	// Executable makes the file executable, for scripts such as git hooks.
 	Executable bool
+	// Overwrite writes the file even if it exists: only for a file the user
+	// agreed to overwrite.
+	Overwrite bool
 }
 
 // Exists reports whether rel exists under the Project directory.
@@ -169,8 +172,8 @@ func LayerDoc(layer string) (File, error) {
 	return File{Path: layer + "/doc.go", Content: content}, nil
 }
 
-// Write writes each file that doesn't exist yet and never overwrites one that
-// does, reporting each skipped file on out.
+// Write writes each file that doesn't exist yet, reporting each skipped file
+// on out. It overwrites an existing file only when the file says Overwrite.
 func Write(dir string, out io.Writer, files []File) error {
 	for _, f := range files {
 		if err := writeIfMissing(dir, out, f); err != nil {
@@ -204,9 +207,14 @@ func writeIfMissing(dir string, out io.Writer, f File) error {
 	if err != nil {
 		return err
 	}
-	if exists {
+	switch {
+	case exists && !f.Overwrite:
 		_, err = fmt.Fprintf(out, "File %s already exists, skipping...\n", f.Path)
 		return err
+	case exists:
+		if _, err = fmt.Fprintf(out, "Overwriting %s...\n", f.Path); err != nil {
+			return err
+		}
 	}
 
 	path := filepath.Join(dir, filepath.FromSlash(f.Path))
@@ -217,5 +225,9 @@ func writeIfMissing(dir string, out io.Writer, f File) error {
 	if f.Executable {
 		perm = execPerm
 	}
-	return os.WriteFile(path, f.Content, perm)
+	if err = os.WriteFile(path, f.Content, perm); err != nil {
+		return err
+	}
+	// WriteFile keeps an existing file's mode.
+	return os.Chmod(path, perm)
 }

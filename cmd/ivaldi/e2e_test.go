@@ -172,3 +172,63 @@ func testPreCommitHook(t *testing.T, dir string) {
 	}
 	git(t, dir, "add", "-A")
 }
+
+// legacyMain is an existing binary's code, clean under the generated lint
+// config, that Adoption must leave alone.
+const legacyMain = `// Command legacy predates Ivaldi.
+package main
+
+import "os"
+
+func main() {
+	_, _ = os.Stdout.WriteString("legacy\n")
+}
+`
+
+func TestAdoptedRepoBuildsVetsAndLints(t *testing.T) {
+	bin := buildIvaldi(t)
+	dir := t.TempDir()
+	existing := map[string]string{
+		"go.mod":             "module example.com/legacy\n\ngo 1.26\n",
+		"cmd/legacy/main.go": legacyMain,
+		"Makefile":           "build:\n\tgo build ./...\n",
+	}
+	for rel, content := range existing {
+		path := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git(t, dir, "init", "-q")
+
+	// legacy: tool. No new binaries. Keep the Makefile. Raise the go line.
+	ivaldi(t, bin, dir, "tool\n\nn\ny\n", "init")
+
+	for _, rel := range []string{"cmd/legacy/main.go", "Makefile"} {
+		got, err := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel)))
+		if err != nil || string(got) != existing[rel] {
+			t.Errorf("expected %s unchanged, got %q (%v)", rel, got, err)
+		}
+	}
+	forge, err := os.ReadFile(filepath.Join(dir, ".forge.yaml"))
+	if err != nil || !strings.Contains(string(forge), "\n  legacy:\n    kind: tool\n") {
+		t.Errorf("expected legacy recorded as a tool, got %q (%v)", forge, err)
+	}
+	goMod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil || !strings.Contains(string(goMod), "\ngo 1.27\n") {
+		t.Errorf("expected the go line raised to 1.27, got %q (%v)", goMod, err)
+	}
+
+	for _, args := range [][]string{{"build", "./..."}, {"vet", "./..."}} {
+		if out, cmdErr := inProject(t, dir, "go", args...); cmdErr != nil {
+			t.Fatalf("go %s failed in the adopted repo: %v\n%s", strings.Join(args, " "), cmdErr, out)
+		}
+	}
+	lint := testtool.Path(t, "golangci-lint")
+	if out, lintErr := inProject(t, dir, lint, "run"); lintErr != nil {
+		t.Fatalf("golangci-lint failed on the adopted repo: %v\n%s", lintErr, out)
+	}
+}
