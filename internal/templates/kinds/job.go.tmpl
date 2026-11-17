@@ -1,0 +1,41 @@
+// Command {{ .Name }} is a job: it runs once to completion. Its schedule is in
+// .forge.yaml.
+package main
+
+import (
+	"context"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/dfryer1193/mjolnir/utils/log"
+)
+
+func main() {
+	os.Exit(execute())
+}
+
+// execute runs the job with a context that is cancelled on SIGINT or SIGTERM,
+// and returns the process exit code: 0 on success, 1 when run fails.
+func execute() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger := log.GetLogger("{{ .Name }}")
+	logger.InfoContext(ctx, "job starting")
+	if err := run(ctx); err != nil {
+		logger.ErrorContext(ctx, "job failed", "error", err)
+		return 1
+	}
+	logger.InfoContext(ctx, "job finished")
+	return 0
+}
+
+// run does the job's work. ctx is cancelled when the job is asked to stop, so
+// pass it to everything that blocks, and return its error when it's done.
+//
+// TODO: implement {{ .Name }}. Put the logic in {{ .ModulePath }}/service
+// and call it from here, so main only wires things together.
+func run(ctx context.Context) error {
+	return ctx.Err()
+}

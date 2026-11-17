@@ -138,3 +138,18 @@ func (p *Prompter) Choice(message string, options []string) (string, error) {
 		fmt.Fprintf(p.out, "Choose one of: %s.\n", strings.Join(options, ", "))
 	}
 }
+
+// Validated prompts like Required, then re-asks, printing the reason, while
+// check rejects the answer. It returns an error wrapping ErrNoInput at EOF.
+func (p *Prompter) Validated(message, defaultValue string, check func(string) error) (string, error) {
+	for {
+		input, err := p.Required(message, defaultValue)
+		if err != nil {
+			return "", err
+		}
+		if err = check(input); err == nil {
+			return input, nil
+		}
+		fmt.Fprintf(p.out, "Invalid answer %q: %v.\n", input, err)
+	}
+}
