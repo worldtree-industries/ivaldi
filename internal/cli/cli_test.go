@@ -726,6 +726,20 @@ func TestInitWritesGitignoreForBuildOutput(t *testing.T) {
 	}
 }
 
+func TestInitWritesGitignoreForDeployableLogs(t *testing.T) {
+	p := newProject(t)
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v", err)
+	}
+
+	// mjolnir's logger writes logs/mjolnir.jsonl under the working directory,
+	// so make run-<name> would otherwise leave it untracked.
+	if !regexp.MustCompile(`(?m)^/logs/$`).MatchString(p.read(".gitignore")) {
+		t.Errorf("expected .gitignore to ignore logs/, got:\n%s", p.read(".gitignore"))
+	}
+}
+
 // The GitHub settings init applies, as the exact gh commands requested.
 func githubSettings() []string {
 	return []string{
