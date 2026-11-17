@@ -1107,3 +1107,66 @@ func TestInitCanCreateHTTPWithClientLayer(t *testing.T) {
 		t.Errorf("expected mjolnir fetched and the module tidied, requested %+v", p.runner.requested)
 	}
 }
+
+const (
+	getMjolnir = "go get github.com/dfryer1193/mjolnir@latest"
+	modTidy    = "go mod tidy"
+)
+
+func TestAFailedFetchWarnsWithTheCommandsToRerunAndStillCompletes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fail string
+		want string // the commands the warning says to run
+	}{
+		"go get fails":      {fail: getMjolnir, want: "  " + getMjolnir + "\n  " + modTidy + "\n"},
+		"go mod tidy fails": {fail: modTidy, want: "  " + modTidy + "\n"},
+	} {
+		t.Run("init/"+name, func(t *testing.T) {
+			p := newProject(t)
+			p.runner.out = map[string]string{
+				"git remote get-url origin": "git@github.com:acme/widget.git\n",
+				adminCheck:                  "true\n",
+			}
+			p.runner.fail = map[string]error{tc.fail: errors.New("network down")}
+
+			if err := p.run("\nweb\nhttp\n\n\n", "init"); err != nil {
+				t.Fatalf("expected init to succeed, got %v\noutput:\n%s", err, p.out)
+			}
+
+			assertFetchWarning(t, p, tc.fail, tc.want)
+			if !strings.Contains(p.read(".forge.yaml"), "  web:\n    kind: http\n") {
+				t.Errorf("expected web in the Manifest, got:\n%s", p.read(".forge.yaml"))
+			}
+			p.read("cmd/web/main.go")
+			if !p.runner.requestedLine(p.dir, githubSettings()[0]) {
+				t.Errorf("expected the GitHub settings still applied, requested %+v", p.runner.requested)
+			}
+		})
+		t.Run("add/"+name, func(t *testing.T) {
+			p := newProject(t)
+			p.initProject()
+			p.runner.fail = map[string]error{tc.fail: errors.New("network down")}
+
+			if err := p.run("web\nhttp\n\n\n", "add"); err != nil {
+				t.Fatalf("expected add to succeed, got %v\noutput:\n%s", err, p.out)
+			}
+
+			assertFetchWarning(t, p, tc.fail, tc.want)
+			if !strings.Contains(p.read(".forge.yaml"), "  web:\n    kind: http\n") {
+				t.Errorf("expected web in the Manifest, got:\n%s", p.read(".forge.yaml"))
+			}
+			p.read("cmd/web/main.go")
+		})
+	}
+}
+
+func assertFetchWarning(t *testing.T, p *project, failed, commands string) {
+	t.Helper()
+	out := p.out.String()
+	if !strings.Contains(out, "Warning: "+failed+" failed (network down). To finish, run:\n"+commands) {
+		t.Errorf("expected a warning naming %q and the commands\n%s\ngot:\n%s", failed, commands, out)
+	}
+	if !strings.Contains(out, "Done! Nothing has been committed") {
+		t.Errorf("expected the command to finish, got:\n%s", out)
+	}
+}

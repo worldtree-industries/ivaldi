@@ -85,21 +85,34 @@ func (s session) sayf(format string, a ...any) {
 	_, _ = fmt.Fprintf(s.env.Out, format+"\n", a...)
 }
 
-func (s session) run(name string, args ...string) error {
-	cmd := Command{Dir: s.env.Dir, Name: name, Args: args}
+// command returns the Command for name and args, run in the Project directory.
+func (s session) command(name string, args ...string) Command {
+	return Command{Dir: s.env.Dir, Name: name, Args: args}
+}
+
+// exec runs cmd and returns its standard output, also echoing it to the user
+// when echo is set. The error is the runner's, unwrapped.
+func (s session) exec(cmd Command, echo bool) ([]byte, error) {
 	output, err := s.env.Runner.Run(s.ctx, cmd)
-	if len(output) > 0 {
+	if echo && len(output) > 0 {
 		_, _ = s.env.Out.Write(output)
 	}
-	if err != nil {
+	return output, err
+}
+
+// run runs a command, echoing its output to the user.
+func (s session) run(name string, args ...string) error {
+	cmd := s.command(name, args...)
+	if _, err := s.exec(cmd, true); err != nil {
 		return fmt.Errorf("%s: %w", cmd, err)
 	}
 	return nil
 }
 
+// output runs a command and returns its trimmed standard output.
 func (s session) output(name string, args ...string) (string, error) {
-	cmd := Command{Dir: s.env.Dir, Name: name, Args: args}
-	output, err := s.env.Runner.Run(s.ctx, cmd)
+	cmd := s.command(name, args...)
+	output, err := s.exec(cmd, false)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", cmd, err)
 	}
@@ -150,9 +163,7 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 	if !plan.empty() {
-		if err = s.fetchModules(plan); err != nil {
-			return err
-		}
+		s.fetchModules(plan)
 	}
 
 	s.applyGitHubSettings()
@@ -253,9 +264,7 @@ func runAdd(ctx context.Context, env Env) error {
 	if err = m.Save(env.Dir); err != nil {
 		return err
 	}
-	if err = s.fetchModules(plan); err != nil {
-		return err
-	}
+	s.fetchModules(plan)
 
 	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil

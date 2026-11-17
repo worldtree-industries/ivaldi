@@ -35,7 +35,7 @@ Adds binaries to an existing Project. It refuses to run without a `.forge.yaml` 
 2. Checks every name before writing anything. A name must be lowercase, start with a letter, use only letters, digits and hyphens, and be at most 63 characters long. It must not appear twice in the list, already be in the Manifest, or already have a `cmd/<name>/` directory. If any name fails, nothing is written and the error names the bad entry.
 3. Asks for each binary's Kind, plus that Kind's questions (below). Invalid answers are asked again.
 4. Writes each binary's `main` package to `cmd/<name>/main.go` and adds the binary to the Manifest.
-5. Fetches the latest mjolnir when a new binary needs it, and runs `go mod tidy`.
+5. Fetches the latest mjolnir when a new binary needs it, and runs `go mod tidy`. If either fails (for example, offline), `add` still succeeds: the files are written, and it warns and prints the commands to run later. `init` does the same when you add binaries during `init`.
 
 To remove or rename a binary, delete its `cmd/<name>/` directory and its Manifest entry by hand.
 
