@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -114,5 +115,26 @@ func (p *Prompter) Select(message string, options []string) int {
 			return choice - 1
 		}
 		fmt.Fprintln(p.out, "Invalid selection. Please try again.")
+	}
+}
+
+// Choice prompts for one of options, re-asking while the answer isn't one of
+// them. It returns an error wrapping ErrNoInput if input ends first.
+func (p *Prompter) Choice(message string, options []string) (string, error) {
+	for {
+		fmt.Fprintf(p.out, "%s (%s): ", message, strings.Join(options, ", "))
+
+		if !p.scanner.Scan() {
+			if err := p.scanner.Err(); err != nil {
+				return "", err
+			}
+			return "", fmt.Errorf("%s: %w", message, ErrNoInput)
+		}
+
+		input := strings.TrimSpace(p.scanner.Text())
+		if slices.Contains(options, input) {
+			return input, nil
+		}
+		fmt.Fprintf(p.out, "Choose one of: %s.\n", strings.Join(options, ", "))
 	}
 }

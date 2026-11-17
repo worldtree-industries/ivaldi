@@ -106,6 +106,7 @@ func Skeleton(modulePath string) ([]File, error) {
 		{Path: "go.mod", Content: fmt.Appendf(nil, "module %s\n\ngo 1.27\n", modulePath)},
 		{Path: "Makefile", Content: templates.Makefile},
 		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
+		{Path: ".gitignore", Content: templates.Gitignore},
 	}
 	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
 		"ModulePath": modulePath,

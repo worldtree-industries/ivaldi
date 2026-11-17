@@ -19,6 +19,11 @@ var Makefile []byte
 //go:embed ivaldi.mk
 var SharedMakefile []byte
 
+// Gitignore is the Unmanaged .gitignore.
+//
+//go:embed gitignore
+var Gitignore []byte
+
 //go:embed ci.tmpl
 var CI string
 
@@ -36,11 +41,7 @@ var GolangCI string
 //go:embed main_http.tmpl
 var MainHTTP string
 
-//go:embed main_worker.tmpl
-var MainWorker string
-
-//go:embed main_cli.tmpl
-var MainCLI string
-
-//go:embed main_interactive.tmpl
-var MainInteractive string
+// Kinds holds each Kind's main Template, as kinds/<kind>.go.tmpl.
+//
+//go:embed kinds
+var Kinds embed.FS
