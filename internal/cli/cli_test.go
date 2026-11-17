@@ -34,6 +34,10 @@ func (f *fakeRunner) requestedLine(dir, line string) bool {
 	})
 }
 
+func (f *fakeRunner) requestedName(name string) bool {
+	return slices.ContainsFunc(f.requested, func(c cli.Command) bool { return c.Name == name })
+}
+
 type project struct {
 	t      *testing.T
 	dir    string
@@ -405,5 +409,109 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 	}
 	for _, missing := range []string{".forge.yaml", "service/doc.go", "data/doc.go", "models/doc.go"} {
 		p.read(missing)
+	}
+}
+
+// The GitHub settings init applies, as the exact gh commands requested.
+func githubSettings() []string {
+	return []string{
+		"gh api --method PUT repos/acme/widget/actions/permissions -F enabled=true -f allowed_actions=selected",
+		"gh api --method PUT repos/acme/widget/actions/permissions/selected-actions" +
+			" -F github_owned_allowed=true -F verified_allowed=false" +
+			" -f patterns_allowed[]=worldtree-industries/*" +
+			" -f patterns_allowed[]=golangci/golangci-lint-action@*" +
+			" -f patterns_allowed[]=docker/login-action@*" +
+			" -f patterns_allowed[]=docker/setup-buildx-action@*" +
+			" -f patterns_allowed[]=docker/build-push-action@*",
+		"gh api --method PUT repos/acme/widget/actions/permissions/workflow" +
+			" -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false",
+	}
+}
+
+const adminCheck = "gh api repos/acme/widget --jq .permissions.admin"
+
+func TestInitAppliesGitHubSettingsWhenOriginIsGitHub(t *testing.T) {
+	p := newProject(t)
+	p.runner.out = map[string]string{
+		"git remote get-url origin": "git@github.com:acme/widget.git\n",
+		adminCheck:                  "true\n",
+	}
+
+	if err := p.run("\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	for _, line := range githubSettings() {
+		if !p.runner.requestedLine(p.dir, line) {
+			t.Errorf("expected %q to be requested; requested %+v", line, p.runner.requested)
+		}
+	}
+	if strings.Contains(p.out.String(), "Warning") {
+		t.Errorf("expected no warning, got:\n%s", p.out)
+	}
+}
+
+func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
+	const repoCommands = `  gh api --method PUT repos/acme/widget/actions/permissions -F enabled=true -f allowed_actions=selected
+  gh api --method PUT repos/acme/widget/actions/permissions/selected-actions -F github_owned_allowed=true -F verified_allowed=false -f 'patterns_allowed[]=worldtree-industries/*' -f 'patterns_allowed[]=golangci/golangci-lint-action@*' -f 'patterns_allowed[]=docker/login-action@*' -f 'patterns_allowed[]=docker/setup-buildx-action@*' -f 'patterns_allowed[]=docker/build-push-action@*'
+  gh api --method PUT repos/acme/widget/actions/permissions/workflow -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
+`
+	const placeholderCommands = `  gh api --method PUT repos/OWNER/REPO/actions/permissions -F enabled=true -f allowed_actions=selected
+`
+	for name, tc := range map[string]struct {
+		origin   string
+		admin    string
+		fail     map[string]error
+		commands string
+		noGH     bool
+	}{
+		"no origin": {
+			fail:     map[string]error{"git remote get-url origin": errors.New("no such remote 'origin'")},
+			commands: placeholderCommands,
+			noGH:     true,
+		},
+		"origin not on GitHub": {
+			origin:   "git@gitlab.com:acme/widget.git",
+			commands: placeholderCommands,
+			noGH:     true,
+		},
+		"gh missing or unauthenticated": {
+			origin:   "git@github.com:acme/widget.git",
+			fail:     map[string]error{adminCheck: errors.New("gh: not logged in")},
+			commands: repoCommands,
+		},
+		"gh lacks admin rights": {
+			origin:   "git@github.com:acme/widget.git",
+			admin:    "false",
+			commands: repoCommands,
+		},
+		"API call fails": {
+			origin:   "git@github.com:acme/widget.git",
+			admin:    "true",
+			fail:     map[string]error{githubSettings()[1]: errors.New("HTTP 409")},
+			commands: repoCommands,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newProject(t)
+			p.runner.out = map[string]string{"git remote get-url origin": tc.origin, adminCheck: tc.admin}
+			p.runner.fail = tc.fail
+
+			if err := p.run("github.com/acme/widget\n", "init"); err != nil {
+				t.Fatalf("expected init to succeed, got %v\noutput:\n%s", err, p.out)
+			}
+
+			out := p.out.String()
+			if !strings.Contains(out, "Warning: GitHub settings were not applied") {
+				t.Errorf("expected a warning, got:\n%s", out)
+			}
+			if !strings.Contains(out, tc.commands) {
+				t.Errorf("expected the commands to apply the settings:\n%s\ngot:\n%s", tc.commands, out)
+			}
+			p.read(".forge.yaml")
+			if tc.noGH && p.runner.requestedName("gh") {
+				t.Errorf("expected no gh calls without a GitHub origin, got %+v", p.runner.requested)
+			}
+		})
 	}
 }

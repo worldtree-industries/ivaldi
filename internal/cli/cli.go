@@ -132,6 +132,8 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 
+	s.applyGitHubSettings()
+
 	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
 }
