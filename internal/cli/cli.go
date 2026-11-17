@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/worldtree-industries/ivaldi/internal/manifest"
@@ -51,21 +53,27 @@ var ErrUsage = errors.New("usage")
 const usage = `Usage: ivaldi <command>
 
 Commands:
-  init     Initialize a new Go project interactively
+  init     Set up a new Project in the current directory
+  add      Add binaries to the Project in the current directory
 `
 
 // Run dispatches args (without the program name) to a command.
 func Run(ctx context.Context, env Env, args []string) error {
-	if len(args) != 1 || args[0] != "init" {
-		if _, err := io.WriteString(env.Out, usage); err != nil {
-			return err
+	if len(args) == 1 {
+		switch args[0] {
+		case "init":
+			return runInit(ctx, env)
+		case "add":
+			return runAdd(ctx, env)
 		}
-		if len(args) == 0 {
-			return fmt.Errorf("%w: no command given", ErrUsage)
-		}
-		return fmt.Errorf("%w: unknown command %q", ErrUsage, strings.Join(args, " "))
 	}
-	return runInit(ctx, env)
+	if _, err := io.WriteString(env.Out, usage); err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("%w: no command given", ErrUsage)
+	}
+	return fmt.Errorf("%w: unknown command %q", ErrUsage, strings.Join(args, " "))
 }
 
 type session struct {
@@ -119,17 +127,32 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 
-	if err = s.ensureGitRepository(); err != nil {
-		return err
-	}
-
 	files, err := scaffold.Skeleton(modulePath)
 	if err != nil {
 		return err
 	}
-	// The Manifest goes last: once it exists, init refuses to run again.
-	if err = scaffold.Write(env.Dir, env.Out, append(files, manifest.New())); err != nil {
+	m := manifest.Empty()
+	plan, err := planBinaries(p, env.Dir, modulePath, m, files, true)
+	if err != nil {
 		return err
+	}
+
+	if err = s.ensureGitRepository(); err != nil {
+		return err
+	}
+	manifestFile, err := m.File()
+	if err != nil {
+		return err
+	}
+	// The Manifest goes last: once it exists, init refuses to run again.
+	files = append(append(files, plan.files...), manifestFile)
+	if err = scaffold.Write(env.Dir, env.Out, files); err != nil {
+		return err
+	}
+	if !plan.empty() {
+		if err = s.fetchModules(plan); err != nil {
+			return err
+		}
 	}
 
 	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
@@ -181,4 +204,61 @@ func modulePathFromRemote(remote string) string {
 		return ""
 	}
 	return host + "/" + path
+}
+
+func runAdd(ctx context.Context, env Env) error {
+	s := session{ctx: ctx, env: env}
+	p := prompt.New(env.In, env.Out)
+
+	hasManifest, err := manifest.Exists(env.Dir)
+	if err != nil {
+		return err
+	}
+	if !hasManifest {
+		return fmt.Errorf("no %s here, so this isn't an Ivaldi Project yet: run ivaldi init first", manifest.FileName)
+	}
+	m, err := manifest.Load(env.Dir)
+	if err != nil {
+		return err
+	}
+	modulePath, err := readModulePath(env.Dir)
+	if err != nil {
+		return err
+	}
+
+	s.sayf("=== Ivaldi: add binaries ===")
+	plan, err := planBinaries(p, env.Dir, modulePath, m, nil, false)
+	if err != nil {
+		return err
+	}
+
+	if err = scaffold.Write(env.Dir, env.Out, plan.files); err != nil {
+		return err
+	}
+	if err = m.Save(env.Dir); err != nil {
+		return err
+	}
+	if err = s.fetchModules(plan); err != nil {
+		return err
+	}
+
+	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
+	return nil
+}
+
+// readModulePath returns the module path declared in the Project's go.mod.
+func readModulePath(dir string) (string, error) {
+	content, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	if err != nil {
+		return "", fmt.Errorf("reading the module path: %w", err)
+	}
+	for line := range strings.SplitSeq(string(content), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module"); ok && rest != "" &&
+			(rest[0] == ' ' || rest[0] == '\t') {
+			if path := strings.Trim(strings.TrimSpace(rest), `"`); path != "" {
+				return path, nil
+			}
+		}
+	}
+	return "", errors.New("go.mod declares no module path")
 }
