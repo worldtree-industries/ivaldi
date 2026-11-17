@@ -94,6 +94,8 @@ Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unl
 
 - `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>`, `install` and `setup-hooks`. Binaries are discovered from `cmd/` each time make runs.
 - `.githooks/pre-commit`: runs `make lint test` before every commit. It needs golangci-lint v2 on `PATH`, and says how to install it if it's missing. `git commit --no-verify` skips it. `core.hooksPath` isn't cloned, so run `make setup-hooks` once in each fresh clone.
+
+  To give an existing Go repo the same hook, including a Project created before Ivaldi generated it, use the `ivaldi-hooks` agent skill in `skills/ivaldi-hooks/`. Install it by symlinking that directory into your agent's skills directory, for example `ln -s "$PWD/skills/ivaldi-hooks" ~/.config/opencode/skills/ivaldi-hooks` from a clone of this repo.
 - `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets and runs with read-only permissions.
 
 **Unmanaged files** are written once, if missing, and then belong to you. Ivaldi never touches them again.
