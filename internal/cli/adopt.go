@@ -16,13 +16,18 @@ import (
 	"github.com/worldtree-industries/ivaldi/internal/scaffold"
 )
 
-// layersAndCmd are the top-level directories the Layer rules and the
-// Manifest cover.
+// layers are the top-level directories the Layer rules cover.
 //
 //nolint:gochecknoglobals // Constant list.
-var layersAndCmd = []string{
-	scaffold.LayerAPI, scaffold.LayerService, scaffold.LayerData, scaffold.LayerModels, scaffold.LayerClient, "cmd",
+var layers = []string{
+	scaffold.LayerAPI, scaffold.LayerService, scaffold.LayerData, scaffold.LayerModels, scaffold.LayerClient,
 }
+
+// managedDirs are the top-level directories Ivaldi covers: the Layers, and
+// cmd/ for the binaries.
+//
+//nolint:gochecknoglobals // Constant list.
+var managedDirs = append(slices.Clone(layers), "cmd")
 
 // discoveredBinary is a cmd/<name>/ directory that already holds package main.
 type discoveredBinary struct {
@@ -77,15 +82,15 @@ func discover(dir string) (*discovery, error) {
 
 // visit records what the directory at path (rel, slash-relative) holds.
 func (d *discovery) visit(path, rel string) error {
-	hasGo, isMain, err := readPackages(path)
-	if err != nil || !hasGo {
+	pkgs, err := readPackages(path)
+	if err != nil || !pkgs.hasGo {
 		return err
 	}
-	if top, _, _ := strings.Cut(rel, "/"); rel != "." && !slices.Contains(layersAndCmd, top) &&
+	if top, _, _ := strings.Cut(rel, "/"); rel != "." && !slices.Contains(managedDirs, top) &&
 		!slices.Contains(d.outside, top) {
 		d.outside = append(d.outside, top)
 	}
-	if !isMain {
+	if !pkgs.isMain {
 		return nil
 	}
 	name, inCmd := strings.CutPrefix(rel, "cmd/")
@@ -133,7 +138,7 @@ func (s session) warn(d *discovery) {
 	}
 	if len(d.outside) > 0 {
 		s.sayf("Note: %s/ hold code outside the Layers, which is left alone: the Layer rules cover only the "+
-			"Layer packages (%s).", strings.Join(d.outside, "/, "), strings.Join(layersAndCmd[:len(layersAndCmd)-1], ", "))
+			"Layer packages (%s).", strings.Join(d.outside, "/, "), strings.Join(layers, ", "))
 	}
 	if d.rootDockerfile {
 		s.sayf("Warning: Ivaldi doesn't use the root Dockerfile: move it to cmd/<name>/Dockerfile " +
@@ -141,35 +146,43 @@ func (s session) warn(d *discovery) {
 	}
 }
 
-// readPackages reports whether dir directly holds any non-test Go files, and
-// whether any of them declares package main.
-func readPackages(dir string) (bool, bool, error) {
+// packages is what a directory's non-test Go files declare.
+type packages struct {
+	// hasGo is set when the directory directly holds any non-test Go files.
+	hasGo bool
+	// isMain is set when any of them declares package main.
+	isMain bool
+}
+
+// readPackages reads the package clauses of dir's own non-test Go files.
+func readPackages(dir string) (packages, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return false, false, err
+		return packages{}, err
 	}
-	hasGo := false
+	var pkgs packages
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		hasGo = true
+		pkgs.hasGo = true
 		f, parseErr := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, name), nil, parser.PackageClauseOnly)
 		if parseErr != nil {
-			return false, false, parseErr
+			return packages{}, parseErr
 		}
 		if f.Name.Name == "main" {
-			return true, true, nil
+			pkgs.isMain = true
+			return pkgs, nil
 		}
 	}
-	return hasGo, false, nil
+	return pkgs, nil
 }
 
 // askOverwrites lists each of files that already exists and that init would
 // otherwise skip, then asks whether to overwrite each one (default no, and end
 // of input is no), marking those to overwrite. It returns whether the
-// pre-commit hook will be Ivaldi's.
+// pre-commit hook will be Ivaldi's Managed one.
 func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 	var existing []int
 	for i, f := range files {
@@ -196,14 +209,14 @@ func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 		}
 		s.sayf("  %s (%s)", files[i].Path, label)
 	}
-	ourHook := true
+	managedHook := true
 	for _, i := range existing {
 		f := &files[i]
 		if f.Overwrite = s.prompt.Bool("Overwrite "+f.Path+"?", false); f.Overwrite {
 			continue
 		}
 		if f.Path == scaffold.PreCommitHookPath {
-			ourHook = false
+			managedHook = false
 		}
 		warning := f.KeptWarning
 		if warning == "" {
@@ -211,7 +224,7 @@ func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 		}
 		s.sayf("Warning: keeping your %s: %s.", f.Path, warning)
 	}
-	return ourHook, nil
+	return managedHook, nil
 }
 
 // planAppends plans appending to each existing file that takes it the lines

@@ -199,7 +199,7 @@ func runInit(s *session) error {
 	if err = plan.askNew(true); err != nil {
 		return err
 	}
-	ourHook, err := s.askOverwrites(files)
+	managedHook, err := s.askOverwrites(files)
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func runInit(s *session) error {
 	}
 	// The Project directory is its own repository's top level by now, so this
 	// never touches the config of a repository it's merely inside.
-	if ourHook {
+	if managedHook {
 		s.turnOnHooks()
 	}
 	if !plan.empty() {
