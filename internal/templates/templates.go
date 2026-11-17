@@ -19,6 +19,11 @@ var Makefile []byte
 //go:embed ivaldi.mk
 var SharedMakefile []byte
 
+// Gitignore is the Unmanaged .gitignore.
+//
+//go:embed gitignore
+var Gitignore []byte
+
 // CI is the Managed CI caller workflow. Its pin of the shared workflow is
 // filled in from scaffold.SharedWorkflowSHA and scaffold.SharedWorkflowVersion
 // in place of __SHARED_WORKFLOW_SHA__ and __SHARED_WORKFLOW_VERSION__.
@@ -40,11 +45,7 @@ var GolangCI string
 //go:embed main_http.tmpl
 var MainHTTP string
 
-//go:embed main_worker.tmpl
-var MainWorker string
-
-//go:embed main_cli.tmpl
-var MainCLI string
-
-//go:embed main_interactive.tmpl
-var MainInteractive string
+// Kinds holds each Kind's main Template, as kinds/<kind>.go.tmpl.
+//
+//go:embed kinds
+var Kinds embed.FS

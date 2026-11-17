@@ -122,6 +122,7 @@ func Skeleton(modulePath string) ([]File, error) {
 		{Path: "Makefile", Content: templates.Makefile},
 		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
 		{Path: CIPath, Content: ciWorkflow(), Managed: true},
+		{Path: ".gitignore", Content: templates.Gitignore},
 	}
 	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
 		"ModulePath": modulePath,
