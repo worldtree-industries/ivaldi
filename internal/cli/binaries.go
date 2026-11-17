@@ -95,11 +95,7 @@ func (b *binaryPlan) add(name string) error {
 			return err
 		}
 	}
-	settings := map[string]any{}
-	for _, s := range answers.Settings {
-		settings[s.Key] = s.Value
-	}
-	main, err := k.Main(kind.Data{Name: name, ModulePath: b.modulePath, Settings: settings})
+	main, err := k.Main(name, b.modulePath, answers.Settings)
 	if err != nil {
 		return err
 	}

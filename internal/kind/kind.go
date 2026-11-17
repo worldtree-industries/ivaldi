@@ -90,8 +90,13 @@ type Data struct {
 	Settings map[string]any
 }
 
-// Main renders the Kind's main Template into cmd/<name>/main.go.
-func (k Kind) Main(data Data) (scaffold.File, error) {
+// Main renders the Kind's main Template into cmd/<name>/main.go, for the
+// binary name with settings in the Project with modulePath.
+func (k Kind) Main(name, modulePath string, settings []manifest.Setting) (scaffold.File, error) {
+	data := Data{Name: name, ModulePath: modulePath, Settings: map[string]any{}}
+	for _, s := range settings {
+		data.Settings[s.Key] = s.Value
+	}
 	src, err := templates.Kinds.ReadFile("kinds/" + k.Name + ".go.tmpl")
 	if err != nil {
 		return scaffold.File{}, fmt.Errorf("no Template for Kind %q: %w", k.Name, err)
