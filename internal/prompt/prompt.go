@@ -58,14 +58,11 @@ func (p *Prompter) Required(message, defaultValue string) (string, error) {
 			fmt.Fprintf(p.out, "%s: ", message)
 		}
 
-		if !p.scanner.Scan() {
-			if err := p.scanner.Err(); err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("%s: %w", message, ErrNoInput)
+		input, err := p.requiredLine(message)
+		if err != nil {
+			return "", err
 		}
-
-		if input := strings.TrimSpace(p.scanner.Text()); input != "" {
+		if input != "" {
 			return input, nil
 		}
 		if defaultValue != "" {
@@ -73,6 +70,18 @@ func (p *Prompter) Required(message, defaultValue string) (string, error) {
 		}
 		fmt.Fprintln(p.out, "An answer is required.")
 	}
+}
+
+// requiredLine reads the trimmed answer to message, or returns an error
+// wrapping ErrNoInput if input ends first.
+func (p *Prompter) requiredLine(message string) (string, error) {
+	if !p.scanner.Scan() {
+		if err := p.scanner.Err(); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("%s: %w", message, ErrNoInput)
+	}
+	return strings.TrimSpace(p.scanner.Text()), nil
 }
 
 // Bool prompts for a yes/no answer.
@@ -124,14 +133,10 @@ func (p *Prompter) Choice(message string, options []string) (string, error) {
 	for {
 		fmt.Fprintf(p.out, "%s (%s): ", message, strings.Join(options, ", "))
 
-		if !p.scanner.Scan() {
-			if err := p.scanner.Err(); err != nil {
-				return "", err
-			}
-			return "", fmt.Errorf("%s: %w", message, ErrNoInput)
+		input, err := p.requiredLine(message)
+		if err != nil {
+			return "", err
 		}
-
-		input := strings.TrimSpace(p.scanner.Text())
 		if slices.Contains(options, input) {
 			return input, nil
 		}

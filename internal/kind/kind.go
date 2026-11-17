@@ -17,6 +17,10 @@ import (
 	"github.com/worldtree-industries/ivaldi/internal/templates"
 )
 
+// mjolnirModule is the go get query for the framework the Deployable Kinds'
+// Templates use.
+const mjolnirModule = "github.com/dfryer1193/mjolnir@latest"
+
 // Kind is one built-in Kind.
 type Kind struct {
 	// Name is the Kind as written in the Manifest and offered by add.
@@ -60,21 +64,9 @@ type Questions struct {
 	// Binaries are the binaries already in the Manifest, followed by those
 	// planned earlier in this run.
 	Binaries []manifest.Binary
-	// exists reports whether a file is in the Project or planned in this run.
-	exists func(rel string) (bool, error)
-}
-
-// NewQuestions returns the Questions for one add run.
-func NewQuestions(
-	p *prompt.Prompter, binaries []manifest.Binary, exists func(rel string) (bool, error),
-) *Questions {
-	return &Questions{Prompt: p, Binaries: binaries, exists: exists}
-}
-
-// Exists reports whether rel (slash-relative) is already in the Project or
-// planned by an earlier binary in this run.
-func (q *Questions) Exists(rel string) (bool, error) {
-	return q.exists(rel)
+	// Exists reports whether rel (slash-relative) is already in the Project
+	// or planned by an earlier binary in this run.
+	Exists func(rel string) (bool, error)
 }
 
 // Answers are what a Kind's Ask decided about one binary.
@@ -98,8 +90,13 @@ type Data struct {
 	Settings map[string]any
 }
 
-// Main renders the Kind's main Template into cmd/<name>/main.go.
-func (k Kind) Main(data Data) (scaffold.File, error) {
+// Main renders the Kind's main Template into cmd/<name>/main.go, for the
+// binary name with settings in the Project with modulePath.
+func (k Kind) Main(name, modulePath string, settings []manifest.Setting) (scaffold.File, error) {
+	data := Data{Name: name, ModulePath: modulePath, Settings: map[string]any{}}
+	for _, s := range settings {
+		data.Settings[s.Key] = s.Value
+	}
 	src, err := templates.Kinds.ReadFile("kinds/" + k.Name + ".go.tmpl")
 	if err != nil {
 		return scaffold.File{}, fmt.Errorf("no Template for Kind %q: %w", k.Name, err)

@@ -39,10 +39,14 @@ func Exists(dir string) (bool, error) {
 	return scaffold.Exists(dir, FileName)
 }
 
-// New returns the Manifest file of a Project with no binaries.
-func New() scaffold.File {
-	return scaffold.File{Path: FileName, Content: []byte(initial)}
-}
+// The setting keys Ivaldi writes to a binary's entry. Kind Templates read
+// them by the same names, for example {{ .Settings.port }}.
+const (
+	// SettingPort is an http binary's port.
+	SettingPort = "port"
+	// SettingSchedule is a job binary's schedule.
+	SettingSchedule = "schedule"
+)
 
 // Binary is one binary's entry in the Manifest.
 type Binary struct {

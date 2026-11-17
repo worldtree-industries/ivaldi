@@ -21,9 +21,9 @@ Both commands work on the current directory, take no arguments and ask everythin
 Sets up a new Project in the current directory:
 
 1. Refuses to run if `.forge.yaml` already exists (use `ivaldi add` instead).
-2. Asks for the module path. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
+2. Asks for the module path, unless there's already a `go.mod`, whose module path it uses. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
 3. Asks for binaries, exactly as `ivaldi add` does. A blank answer creates a Project with no binaries yet.
-4. Runs `git init` if the directory isn't a git repository.
+4. Runs `git init` unless the directory is already the top level of a git repository. A directory inside another repository (a subdirectory of a monorepo, say) gets its own repository, and the outer repository's `origin` is never used for the module path or GitHub settings.
 5. Writes the Project files, skipping any file that already exists. It never overwrites anything, so you can run it in a partly set-up repository.
 6. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
 
@@ -35,7 +35,7 @@ Adds binaries to an existing Project. It refuses to run without a `.forge.yaml` 
 2. Checks every name before writing anything. A name must be lowercase, start with a letter, use only letters, digits and hyphens, and be at most 63 characters long. It must not appear twice in the list, already be in the Manifest, or already have a `cmd/<name>/` directory. If any name fails, nothing is written and the error names the bad entry.
 3. Asks for each binary's Kind, plus that Kind's questions (below). Invalid answers are asked again.
 4. Writes each binary's `main` package to `cmd/<name>/main.go` and adds the binary to the Manifest.
-5. Fetches the latest mjolnir when a new binary needs it, and runs `go mod tidy`.
+5. Fetches the latest mjolnir when a new binary needs it, and runs `go mod tidy`. If either fails (for example, offline), `add` still succeeds: the files are written, and it warns and prints the commands to run later. `init` does the same when you add binaries during `init`.
 
 To remove or rename a binary, delete its `cmd/<name>/` directory and its Manifest entry by hand.
 
@@ -49,7 +49,7 @@ A binary's Kind decides its Template, and whether it's a Deployable (packaged in
 | `job`  | Deployable | a schedule                                                  |
 | `tool` | Tool       | nothing                                                     |
 
-- **`http`** is a long-running HTTP server built on [mjolnir](https://github.com/dfryer1193/mjolnir). It has mjolnir's router with built-in liveness, readiness and startup probes, safe server defaults, a graceful drain on SIGTERM and mjolnir's logger. It listens on `PORT`, falling back to the port chosen during `add`. That port defaults to the next free one from 8080 in the Manifest, and must be unique within the Project. The generated readiness check reports not-ready until you implement it, so it can't be forgotten.
+- **`http`** is a long-running HTTP server built on [mjolnir](https://github.com/dfryer1193/mjolnir). It has mjolnir's router with built-in liveness, readiness and startup probes, safe server defaults, a graceful drain on SIGTERM and mjolnir's logger. It listens on `PORT`, falling back to the port chosen during `add`. That port defaults to the next free one from 8080 in the Manifest, must be from 1024 to 65535, and must be unique within the Project. The generated readiness check reports not-ready until you implement it, so it can't be forgotten.
 - **`job`** runs once to completion. It calls a single `run(ctx) error`, with a context that's cancelled on SIGINT or SIGTERM, logs through mjolnir's logger and exits with code 1 on error. Its schedule is `hourly`, `daily`, `weekly`, `monthly`, `none` (the default: run once) or a 5-field cron expression. Keywords stay keywords in the Manifest.
 - **`tool`** uses the standard `flag` package and plain terminal output, and supports `-version` from the build info. Tools are distributed only with `go install <module>/cmd/<name>@<version>`.
 
@@ -125,7 +125,7 @@ This needs `origin` to point at GitHub and `gh` to be authenticated with admin r
 
 ## Developing Ivaldi
 
-Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` is the one `init` generates. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
+Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` and `ivaldi.mk` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
 
 - `make test` runs the unit tests. They run offline.
 - `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).

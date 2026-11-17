@@ -9,8 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -62,9 +60,9 @@ func Run(ctx context.Context, env Env, args []string) error {
 	if len(args) == 1 {
 		switch args[0] {
 		case "init":
-			return runInit(ctx, env)
+			return initCommand.execute(ctx, env)
 		case "add":
-			return runAdd(ctx, env)
+			return addCommand.execute(ctx, env)
 		}
 	}
 	if _, err := io.WriteString(env.Out, usage); err != nil {
@@ -76,53 +74,105 @@ func Run(ctx context.Context, env Env, args []string) error {
 	return fmt.Errorf("%w: unknown command %q", ErrUsage, strings.Join(args, " "))
 }
 
+// command is init or add: what they share around their own steps.
+type command struct {
+	// title is shown when the command starts.
+	title string
+	// needsManifest is whether the Project must already have a Manifest. If
+	// it doesn't match, the command refuses with refusal before doing anything.
+	needsManifest bool
+	refusal       string
+	run           func(s *session) error
+}
+
+//nolint:gochecknoglobals // Constant command table.
+var (
+	initCommand = command{
+		title:         "new Project",
+		needsManifest: false,
+		refusal: manifest.FileName + " already exists, so this is already an Ivaldi Project: " +
+			"use ivaldi add to add binaries",
+		run: runInit,
+	}
+	addCommand = command{
+		title:         "add binaries",
+		needsManifest: true,
+		refusal:       "no " + manifest.FileName + " here, so this isn't an Ivaldi Project yet: run ivaldi init first",
+		run:           runAdd,
+	}
+)
+
+func (c command) execute(ctx context.Context, env Env) error {
+	hasManifest, err := manifest.Exists(env.Dir)
+	if err != nil {
+		return err
+	}
+	if hasManifest != c.needsManifest {
+		return errors.New(c.refusal)
+	}
+
+	s := &session{ctx: ctx, env: env, prompt: prompt.New(env.In, env.Out)}
+	s.sayf("=== Ivaldi: %s ===", c.title)
+	if err = c.run(s); err != nil {
+		return err
+	}
+	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
+	return nil
+}
+
 type session struct {
-	ctx context.Context //nolint:containedctx // Scoped to a single command run.
-	env Env
+	ctx    context.Context //nolint:containedctx // Scoped to a single command run.
+	env    Env
+	prompt *prompt.Prompter
+	// ownRepo is set when the Project directory was already the top level of
+	// a git work tree when the command started. Otherwise any repository it's
+	// in belongs to something else, and its origin isn't the Project's.
+	ownRepo bool
 }
 
 func (s session) sayf(format string, a ...any) {
 	_, _ = fmt.Fprintf(s.env.Out, format+"\n", a...)
 }
 
-func (s session) run(name string, args ...string) error {
-	cmd := Command{Dir: s.env.Dir, Name: name, Args: args}
+// command returns the Command for name and args, run in the Project directory.
+func (s session) command(name string, args ...string) Command {
+	return Command{Dir: s.env.Dir, Name: name, Args: args}
+}
+
+// exec runs cmd and returns its standard output, also echoing it to the user
+// when echo is set. The error is the runner's, unwrapped.
+func (s session) exec(cmd Command, echo bool) ([]byte, error) {
 	output, err := s.env.Runner.Run(s.ctx, cmd)
-	if len(output) > 0 {
+	if echo && len(output) > 0 {
 		_, _ = s.env.Out.Write(output)
 	}
-	if err != nil {
+	return output, err
+}
+
+// run runs a command, echoing its output to the user.
+func (s session) run(name string, args ...string) error {
+	cmd := s.command(name, args...)
+	if _, err := s.exec(cmd, true); err != nil {
 		return fmt.Errorf("%s: %w", cmd, err)
 	}
 	return nil
 }
 
+// output runs a command and returns its trimmed standard output.
 func (s session) output(name string, args ...string) (string, error) {
-	cmd := Command{Dir: s.env.Dir, Name: name, Args: args}
-	output, err := s.env.Runner.Run(s.ctx, cmd)
+	cmd := s.command(name, args...)
+	output, err := s.exec(cmd, false)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", cmd, err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
-func runInit(ctx context.Context, env Env) error {
-	s := session{ctx: ctx, env: env}
-	p := prompt.New(env.In, env.Out)
-
-	hasManifest, err := manifest.Exists(env.Dir)
-	if err != nil {
-		return err
-	}
-	if hasManifest {
-		return fmt.Errorf("%s already exists, so this is already an Ivaldi Project: use ivaldi add to add binaries",
-			manifest.FileName)
-	}
-
-	s.sayf("=== Ivaldi: new Project ===")
+func runInit(s *session) error {
+	s.ownRepo = s.isRepositoryTopLevel()
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
-	modulePath, err := p.Required("Module path", s.originModulePath())
+	modulePath, err := s.askModulePath()
 	if err != nil {
 		return err
 	}
@@ -132,13 +182,15 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 	m := manifest.Empty()
-	plan, err := planBinaries(p, env.Dir, modulePath, m, files, true)
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, files, true)
 	if err != nil {
 		return err
 	}
 
-	if err = s.ensureGitRepository(); err != nil {
-		return err
+	if !s.ownRepo {
+		if err = s.run("git", "init"); err != nil {
+			return err
+		}
 	}
 	manifestFile, err := m.File()
 	if err != nil {
@@ -146,121 +198,76 @@ func runInit(ctx context.Context, env Env) error {
 	}
 	// The Manifest goes last: once it exists, init refuses to run again.
 	files = append(append(files, plan.files...), manifestFile)
-	if err = scaffold.Write(env.Dir, env.Out, files); err != nil {
+	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
 		return err
 	}
 	if !plan.empty() {
-		if err = s.fetchModules(plan); err != nil {
-			return err
-		}
+		s.fetchModules(plan)
 	}
 
 	s.applyGitHubSettings()
-
-	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
 }
 
-// ensureGitRepository runs git init unless the Project directory is already
-// inside a git work tree. It never commits.
-func (s session) ensureGitRepository() error {
-	if _, err := s.output("git", "rev-parse", "--is-inside-work-tree"); err == nil {
-		return nil
+// isRepositoryTopLevel reports whether the Project directory is the top level
+// of a git work tree, not just somewhere inside one.
+func (s session) isRepositoryTopLevel() bool {
+	top, err := s.output("git", "rev-parse", "--show-toplevel")
+	if err != nil || top == "" {
+		return false
 	}
-	return s.run("git", "init")
+	return sameDir(top, s.env.Dir)
 }
 
-// originModulePath derives a module path from the origin remote, or returns ""
-// when there is no usable remote.
-func (s session) originModulePath() string {
+// sameDir reports whether a and b are the same directory, after resolving
+// symlinks.
+func sameDir(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return ra == rb
+}
+
+// origin returns the URL of the Project's origin remote, or "" when it has
+// none. A repository the Project is merely inside isn't the Project's, and one
+// init creates has no remotes, so neither has an origin.
+func (s session) origin() string {
+	if !s.ownRepo {
+		return ""
+	}
 	remote, err := s.output("git", "remote", "get-url", "origin")
 	if err != nil {
 		return ""
 	}
-	return modulePathFromRemote(remote)
+	return remote
 }
 
-// modulePathFromRemote turns a git remote URL into a module path, for example
-// git@github.com:org/repo.git or https://github.com/org/repo into
-// github.com/org/repo. It returns "" for a URL it can't make sense of.
-func modulePathFromRemote(remote string) string {
-	var host, path string
-	if strings.Contains(remote, "://") {
-		u, err := url.Parse(remote)
-		if err != nil {
-			return ""
-		}
-		host, path = u.Hostname(), u.Path
-	} else {
-		// scp-like syntax: [user@]host:path
-		var ok bool
-		if host, path, ok = strings.Cut(remote, ":"); !ok {
-			return ""
-		}
-		if _, h, hasUser := strings.Cut(host, "@"); hasUser {
-			host = h
-		}
-	}
-	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
-	if host == "" || path == "" {
-		return ""
-	}
-	return host + "/" + path
-}
-
-func runAdd(ctx context.Context, env Env) error {
-	s := session{ctx: ctx, env: env}
-	p := prompt.New(env.In, env.Out)
-
-	hasManifest, err := manifest.Exists(env.Dir)
+func runAdd(s *session) error {
+	m, err := manifest.Load(s.env.Dir)
 	if err != nil {
 		return err
 	}
-	if !hasManifest {
-		return fmt.Errorf("no %s here, so this isn't an Ivaldi Project yet: run ivaldi init first", manifest.FileName)
-	}
-	m, err := manifest.Load(env.Dir)
-	if err != nil {
-		return err
-	}
-	modulePath, err := readModulePath(env.Dir)
+	modulePath, err := readModulePath(s.env.Dir)
 	if err != nil {
 		return err
 	}
 
-	s.sayf("=== Ivaldi: add binaries ===")
-	plan, err := planBinaries(p, env.Dir, modulePath, m, nil, false)
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, nil, false)
 	if err != nil {
 		return err
 	}
 
-	if err = scaffold.Write(env.Dir, env.Out, plan.files); err != nil {
+	if err = scaffold.Write(s.env.Dir, s.env.Out, plan.files); err != nil {
 		return err
 	}
-	if err = m.Save(env.Dir); err != nil {
+	if err = m.Save(s.env.Dir); err != nil {
 		return err
 	}
-	if err = s.fetchModules(plan); err != nil {
-		return err
-	}
-
-	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
+	s.fetchModules(plan)
 	return nil
-}
-
-// readModulePath returns the module path declared in the Project's go.mod.
-func readModulePath(dir string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		return "", fmt.Errorf("reading the module path: %w", err)
-	}
-	for line := range strings.SplitSeq(string(content), "\n") {
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "module"); ok && rest != "" &&
-			(rest[0] == ' ' || rest[0] == '\t') {
-			if path := strings.Trim(strings.TrimSpace(rest), `"`); path != "" {
-				return path, nil
-			}
-		}
-	}
-	return "", errors.New("go.mod declares no module path")
 }

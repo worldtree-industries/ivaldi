@@ -24,10 +24,6 @@ var scheduleKeywords = []string{"hourly", "daily", "weekly", "monthly", defaultS
 // month, month and day of week.
 const cronFields = 5
 
-// mjolnirModule is the go get query for the framework the Deployable Kinds'
-// Templates use.
-const mjolnirModule = "github.com/dfryer1193/mjolnir@latest"
-
 // Job returns the job Kind: a Deployable that runs once to completion, either
 // once per rollout or on a schedule.
 func Job() Kind {
@@ -45,7 +41,7 @@ func askJob(q *Questions, name string) (Answers, error) {
 	if err != nil {
 		return Answers{}, err
 	}
-	return Answers{Settings: []manifest.Setting{{Key: "schedule", Value: schedule}}}, nil
+	return Answers{Settings: []manifest.Setting{{Key: manifest.SettingSchedule, Value: schedule}}}, nil
 }
 
 // validateSchedule accepts a keyword or a standard 5-field cron expression.

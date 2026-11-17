@@ -52,6 +52,23 @@ func newProject(t *testing.T) *project {
 	return &project{t: t, dir: t.TempDir(), runner: &fakeRunner{}, out: &bytes.Buffer{}}
 }
 
+// script makes the fake runner print stdout for the command line.
+func (p *project) script(line, stdout string) {
+	if p.runner.out == nil {
+		p.runner.out = map[string]string{}
+	}
+	p.runner.out[line] = stdout
+}
+
+const showToplevel = "git rev-parse --show-toplevel"
+
+// inOwnRepo makes the Project directory the top level of a git repo whose
+// origin is origin.
+func (p *project) inOwnRepo(origin string) {
+	p.script(showToplevel, p.dir+"\n")
+	p.script("git remote get-url origin", origin)
+}
+
 func (p *project) run(input string, args ...string) error {
 	p.t.Helper()
 	return cli.Run(context.Background(), cli.Env{
@@ -84,7 +101,7 @@ func (p *project) write(rel, content string) {
 
 func TestInitDefaultsModulePathFromOriginAndWritesGoMod(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git\n"}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
 
 	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
@@ -149,8 +166,8 @@ func TestInitAsksModulePathWithNoDefaultWithoutRemote(t *testing.T) {
 func TestInitFailsWhenInputEndsWithoutModulePath(t *testing.T) {
 	p := newProject(t)
 	p.runner.fail = map[string]error{
-		"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-		"git remote get-url origin":           errors.New("not a git repository"),
+		showToplevel:                errors.New("not a git repository"),
+		"git remote get-url origin": errors.New("not a git repository"),
 	}
 
 	if err := p.run("", "init"); err == nil {
@@ -176,7 +193,7 @@ func TestInitModulePathDefaultHandlesRemoteURLForms(t *testing.T) {
 	} {
 		t.Run(remote, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": remote + "\n"}
+			p.inOwnRepo(remote + "\n")
 
 			if err := p.run("\n", "init"); err != nil {
 				t.Fatalf("init failed: %v", err)
@@ -189,24 +206,27 @@ func TestInitModulePathDefaultHandlesRemoteURLForms(t *testing.T) {
 	}
 }
 
-func TestInitRunsGitInitOnlyOutsideARepository(t *testing.T) {
+func TestInitRunsGitInitUnlessTheProjectIsTheTopLevelOfARepository(t *testing.T) {
 	for name, tc := range map[string]struct {
-		insideRepo  bool
+		// toplevel returns what git rev-parse --show-toplevel prints, or ""
+		// for no repository.
+		toplevel    func(p *project) string
 		wantGitInit bool
 	}{
-		"not a repository":     {insideRepo: false, wantGitInit: true},
-		"already a repository": {insideRepo: true, wantGitInit: false},
+		"not a repository":            {toplevel: func(*project) string { return "" }, wantGitInit: true},
+		"top level of a repository":   {toplevel: func(p *project) string { return p.dir }, wantGitInit: false},
+		"inside a parent repository":  {toplevel: func(p *project) string { return filepath.Dir(p.dir) }, wantGitInit: true},
+		"top level through a symlink": {toplevel: func(p *project) string { return p.symlinked() }, wantGitInit: false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": "git@github.com:acme/widget.git"}
-			if !tc.insideRepo {
-				p.runner.fail = map[string]error{
-					"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-				}
+			if toplevel := tc.toplevel(p); toplevel == "" {
+				p.runner.fail = map[string]error{showToplevel: errors.New("not a git repository")}
+			} else {
+				p.script(showToplevel, toplevel+"\n")
 			}
 
-			if err := p.run("\n", "init"); err != nil {
+			if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
 				t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
 			}
 
@@ -222,11 +242,52 @@ func TestInitRunsGitInitOnlyOutsideARepository(t *testing.T) {
 	}
 }
 
+// symlinked moves the Project directory behind a symlink: p.dir becomes the
+// link, and the real directory is returned.
+func (p *project) symlinked() string {
+	p.t.Helper()
+	target := filepath.Join(p.t.TempDir(), "real")
+	if err := os.Mkdir(target, 0o750); err != nil {
+		p.t.Fatal(err)
+	}
+	link := filepath.Join(p.t.TempDir(), "link")
+	if err := os.Symlink(target, link); err != nil {
+		p.t.Fatal(err)
+	}
+	p.dir = link
+	return target
+}
+
+func TestInitInsideAParentRepositoryIgnoresTheParentsOrigin(t *testing.T) {
+	p := newProject(t)
+	p.script(showToplevel, filepath.Dir(p.dir)+"\n")
+	p.script("git remote get-url origin", "git@github.com:acme/monorepo.git\n")
+	p.script("gh api repos/acme/monorepo --jq .permissions.admin", "true\n")
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	out := p.out.String()
+	if strings.Contains(out, "monorepo") {
+		t.Errorf("expected nothing derived from the parent repository's origin, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Module path: ") {
+		t.Errorf("expected the module path asked with no default, got:\n%s", out)
+	}
+	if p.runner.requestedName("gh") {
+		t.Errorf("expected no gh calls for the parent repository, got %+v", p.runner.requested)
+	}
+	if !strings.Contains(out, "Warning: GitHub settings were not applied") {
+		t.Errorf("expected a warning about GitHub settings, got:\n%s", out)
+	}
+}
+
 func TestInitFailsWhenGitInitFails(t *testing.T) {
 	p := newProject(t)
 	p.runner.fail = map[string]error{
-		"git rev-parse --is-inside-work-tree": errors.New("not a git repository"),
-		"git init":                            errors.New("boom"),
+		showToplevel: errors.New("not a git repository"),
+		"git init":   errors.New("boom"),
 	}
 
 	if err := p.run("github.com/acme/widget\n", "init"); err == nil || !strings.Contains(err.Error(), "boom") {
@@ -401,7 +462,7 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 		p.write(rel, content)
 	}
 
-	if err := p.run("github.com/acme/widget\n", "init"); err != nil {
+	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v", err)
 	}
 
@@ -415,6 +476,49 @@ func TestInitWritesOnlyMissingFiles(t *testing.T) {
 	}
 	for _, missing := range []string{".forge.yaml", "service/doc.go", "data/doc.go", "models/doc.go"} {
 		p.read(missing)
+	}
+}
+
+func TestInitUsesTheModulePathOfAnExistingGoMod(t *testing.T) {
+	p := newProject(t)
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
+	p.write("go.mod", "module example.com/mine\n\ngo 1.27\n")
+
+	if err := p.run("web\nhttp\n\n\n", "init"); err != nil {
+		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	if strings.Contains(p.out.String(), "Module path") {
+		t.Errorf("expected no module path question with a go.mod, got:\n%s", p.out)
+	}
+	cfg := p.read(".golangci.yml")
+	if !strings.Contains(cfg, "local-prefixes:\n        - example.com/mine\n") {
+		t.Errorf("expected goimports local prefix from go.mod, got:\n%s", cfg)
+	}
+	if !strings.Contains(depguardRule(t, cfg, "api layer"), "- pkg: example.com/mine/data$\n") {
+		t.Errorf("expected depguard rules for the go.mod module path, got:\n%s", cfg)
+	}
+	if strings.Contains(cfg, "github.com/acme/widget") {
+		t.Errorf("expected nothing derived from origin, got:\n%s", cfg)
+	}
+	if !strings.HasPrefix(p.read("README.md"), "# mine\n") {
+		t.Errorf("expected README titled from go.mod, got:\n%s", p.read("README.md"))
+	}
+	if !strings.Contains(p.read("cmd/web/main.go"), "example.com/mine/") {
+		t.Errorf("expected cmd/web to import the go.mod module's Layers:\n%s", p.read("cmd/web/main.go"))
+	}
+}
+
+func TestInitFailsWithNothingWrittenWhenGoModHasNoModulePath(t *testing.T) {
+	p := newProject(t)
+	p.write("go.mod", "go 1.27\n")
+	before := snapshot(t, p.dir)
+
+	if err := p.run("github.com/acme/widget\n\n", "init"); err == nil {
+		t.Fatalf("expected init to fail")
+	}
+	if !maps.Equal(before, snapshot(t, p.dir)) {
+		t.Errorf("expected nothing written")
 	}
 }
 
@@ -760,10 +864,8 @@ const adminCheck = "gh api repos/acme/widget --jq .permissions.admin"
 
 func TestInitAppliesGitHubSettingsWhenOriginIsGitHub(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{
-		"git remote get-url origin": "git@github.com:acme/widget.git\n",
-		adminCheck:                  "true\n",
-	}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
+	p.script(adminCheck, "true\n")
 
 	if err := p.run("\n", "init"); err != nil {
 		t.Fatalf("init failed: %v\noutput:\n%s", err, p.out)
@@ -822,7 +924,8 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := newProject(t)
-			p.runner.out = map[string]string{"git remote get-url origin": tc.origin, adminCheck: tc.admin}
+			p.inOwnRepo(tc.origin)
+			p.script(adminCheck, tc.admin)
 			p.runner.fail = tc.fail
 
 			if err := p.run("github.com/acme/widget\n", "init"); err != nil {
@@ -846,10 +949,8 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 
 func TestAddNeverTouchesGitHub(t *testing.T) {
 	p := newProject(t)
-	p.runner.out = map[string]string{
-		"git remote get-url origin": "git@github.com:acme/widget.git\n",
-		adminCheck:                  "true\n",
-	}
+	p.inOwnRepo("git@github.com:acme/widget.git\n")
+	p.script(adminCheck, "true\n")
 	p.initProject()
 
 	if err := p.run("a\ntool\n", "add"); err != nil {
@@ -934,18 +1035,35 @@ func TestAddHTTPReasksAnInvalidOrUsedPort(t *testing.T) {
 	p.initProject()
 	p.write(".forge.yaml", "version: 1\nbinaries:\n  web:\n    kind: http\n    port: 9090\n")
 
-	if err := p.run("a\nhttp\nabc\n0\n65536\n9090\n9091\n\n", "add"); err != nil {
+	if err := p.run("a\nhttp\nabc\n0\n80\n1023\n65536\n9090\n9091\n\n", "add"); err != nil {
 		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
 	}
 
-	if got := strings.Count(p.out.String(), "Port for a [8080]: "); got != 5 {
-		t.Errorf("expected the port asked 5 times, got %d:\n%s", got, p.out)
+	if got := strings.Count(p.out.String(), "Port for a [8080]: "); got != 7 {
+		t.Errorf("expected the port asked 7 times, got %d:\n%s", got, p.out)
+	}
+	if !strings.Contains(p.out.String(), "from 1024 to 65535") {
+		t.Errorf("expected the allowed range in the message, got:\n%s", p.out)
 	}
 	if !strings.Contains(p.out.String(), "9090 is already used") {
 		t.Errorf("expected a message that 9090 is taken, got:\n%s", p.out)
 	}
 	if !strings.Contains(p.read(".forge.yaml"), "  a:\n    kind: http\n    port: 9091\n") {
 		t.Errorf("expected a on 9091, got:\n%s", p.read(".forge.yaml"))
+	}
+}
+
+func TestAddHTTPAcceptsThePortRangeBounds(t *testing.T) {
+	p := newProject(t)
+	p.initProject()
+
+	if err := p.run("a, b\nhttp\n1024\n\nhttp\n65535\n\n", "add"); err != nil {
+		t.Fatalf("add failed: %v\noutput:\n%s", err, p.out)
+	}
+
+	want := "  a:\n    kind: http\n    port: 1024\n  b:\n    kind: http\n    port: 65535\n"
+	if !strings.Contains(p.read(".forge.yaml"), want) {
+		t.Errorf("expected a on 1024 and b on 65535, got:\n%s", p.read(".forge.yaml"))
 	}
 }
 
@@ -1045,5 +1163,66 @@ func TestInitCanCreateHTTPWithClientLayer(t *testing.T) {
 	if !p.runner.requestedLine(p.dir, "go get github.com/dfryer1193/mjolnir@latest") ||
 		!p.runner.requestedLine(p.dir, "go mod tidy") {
 		t.Errorf("expected mjolnir fetched and the module tidied, requested %+v", p.runner.requested)
+	}
+}
+
+const (
+	getMjolnir = "go get github.com/dfryer1193/mjolnir@latest"
+	modTidy    = "go mod tidy"
+)
+
+func TestAFailedFetchWarnsWithTheCommandsToRerunAndStillCompletes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		fail string
+		want string // the commands the warning says to run
+	}{
+		"go get fails":      {fail: getMjolnir, want: "  " + getMjolnir + "\n  " + modTidy + "\n"},
+		"go mod tidy fails": {fail: modTidy, want: "  " + modTidy + "\n"},
+	} {
+		t.Run("init/"+name, func(t *testing.T) {
+			p := newProject(t)
+			p.inOwnRepo("git@github.com:acme/widget.git\n")
+			p.script(adminCheck, "true\n")
+			p.runner.fail = map[string]error{tc.fail: errors.New("network down")}
+
+			if err := p.run("\nweb\nhttp\n\n\n", "init"); err != nil {
+				t.Fatalf("expected init to succeed, got %v\noutput:\n%s", err, p.out)
+			}
+
+			assertFetchWarning(t, p, tc.fail, tc.want)
+			if !strings.Contains(p.read(".forge.yaml"), "  web:\n    kind: http\n") {
+				t.Errorf("expected web in the Manifest, got:\n%s", p.read(".forge.yaml"))
+			}
+			p.read("cmd/web/main.go")
+			if !p.runner.requestedLine(p.dir, githubSettings()[0]) {
+				t.Errorf("expected the GitHub settings still applied, requested %+v", p.runner.requested)
+			}
+		})
+		t.Run("add/"+name, func(t *testing.T) {
+			p := newProject(t)
+			p.initProject()
+			p.runner.fail = map[string]error{tc.fail: errors.New("network down")}
+
+			if err := p.run("web\nhttp\n\n\n", "add"); err != nil {
+				t.Fatalf("expected add to succeed, got %v\noutput:\n%s", err, p.out)
+			}
+
+			assertFetchWarning(t, p, tc.fail, tc.want)
+			if !strings.Contains(p.read(".forge.yaml"), "  web:\n    kind: http\n") {
+				t.Errorf("expected web in the Manifest, got:\n%s", p.read(".forge.yaml"))
+			}
+			p.read("cmd/web/main.go")
+		})
+	}
+}
+
+func assertFetchWarning(t *testing.T, p *project, failed, commands string) {
+	t.Helper()
+	out := p.out.String()
+	if !strings.Contains(out, "Warning: "+failed+" failed (network down). To finish, run:\n"+commands) {
+		t.Errorf("expected a warning naming %q and the commands\n%s\ngot:\n%s", failed, commands, out)
+	}
+	if !strings.Contains(out, "Done! Nothing has been committed") {
+		t.Errorf("expected the command to finish, got:\n%s", out)
 	}
 }
