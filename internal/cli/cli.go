@@ -60,9 +60,9 @@ func Run(ctx context.Context, env Env, args []string) error {
 	if len(args) == 1 {
 		switch args[0] {
 		case "init":
-			return runInit(ctx, env)
+			return initCommand.execute(ctx, env)
 		case "add":
-			return runAdd(ctx, env)
+			return addCommand.execute(ctx, env)
 		}
 	}
 	if _, err := io.WriteString(env.Out, usage); err != nil {
@@ -74,9 +74,56 @@ func Run(ctx context.Context, env Env, args []string) error {
 	return fmt.Errorf("%w: unknown command %q", ErrUsage, strings.Join(args, " "))
 }
 
+// command is init or add: what they share around their own steps.
+type command struct {
+	// title is shown when the command starts.
+	title string
+	// needsManifest is whether the Project must already have a Manifest. If
+	// it doesn't match, the command refuses with refusal before doing anything.
+	needsManifest bool
+	refusal       string
+	run           func(s *session) error
+}
+
+//nolint:gochecknoglobals // Constant command table.
+var (
+	initCommand = command{
+		title:         "new Project",
+		needsManifest: false,
+		refusal: manifest.FileName + " already exists, so this is already an Ivaldi Project: " +
+			"use ivaldi add to add binaries",
+		run: runInit,
+	}
+	addCommand = command{
+		title:         "add binaries",
+		needsManifest: true,
+		refusal:       "no " + manifest.FileName + " here, so this isn't an Ivaldi Project yet: run ivaldi init first",
+		run:           runAdd,
+	}
+)
+
+func (c command) execute(ctx context.Context, env Env) error {
+	hasManifest, err := manifest.Exists(env.Dir)
+	if err != nil {
+		return err
+	}
+	if hasManifest != c.needsManifest {
+		return errors.New(c.refusal)
+	}
+
+	s := &session{ctx: ctx, env: env, prompt: prompt.New(env.In, env.Out)}
+	s.sayf("=== Ivaldi: %s ===", c.title)
+	if err = c.run(s); err != nil {
+		return err
+	}
+	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
+	return nil
+}
+
 type session struct {
-	ctx context.Context //nolint:containedctx // Scoped to a single command run.
-	env Env
+	ctx    context.Context //nolint:containedctx // Scoped to a single command run.
+	env    Env
+	prompt *prompt.Prompter
 	// ownRepo is set when the Project directory was already the top level of
 	// a git work tree when the command started. Otherwise any repository it's
 	// in belongs to something else, and its origin isn't the Project's.
@@ -121,24 +168,11 @@ func (s session) output(name string, args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), nil
 }
 
-func runInit(ctx context.Context, env Env) error {
-	s := session{ctx: ctx, env: env}
-	p := prompt.New(env.In, env.Out)
-
-	hasManifest, err := manifest.Exists(env.Dir)
-	if err != nil {
-		return err
-	}
-	if hasManifest {
-		return fmt.Errorf("%s already exists, so this is already an Ivaldi Project: use ivaldi add to add binaries",
-			manifest.FileName)
-	}
-
-	s.sayf("=== Ivaldi: new Project ===")
+func runInit(s *session) error {
 	s.ownRepo = s.isRepositoryTopLevel()
 	// Ask everything before changing anything, so a failed answer leaves the
 	// directory as it was.
-	modulePath, err := s.askModulePath(p)
+	modulePath, err := s.askModulePath()
 	if err != nil {
 		return err
 	}
@@ -148,7 +182,7 @@ func runInit(ctx context.Context, env Env) error {
 		return err
 	}
 	m := manifest.Empty()
-	plan, err := planBinaries(p, env.Dir, modulePath, m, files, true)
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, files, true)
 	if err != nil {
 		return err
 	}
@@ -164,7 +198,7 @@ func runInit(ctx context.Context, env Env) error {
 	}
 	// The Manifest goes last: once it exists, init refuses to run again.
 	files = append(append(files, plan.files...), manifestFile)
-	if err = scaffold.Write(env.Dir, env.Out, files); err != nil {
+	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
 		return err
 	}
 	if !plan.empty() {
@@ -172,8 +206,6 @@ func runInit(ctx context.Context, env Env) error {
 	}
 
 	s.applyGitHubSettings()
-
-	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
 }
 
@@ -215,40 +247,27 @@ func (s session) origin() string {
 	return remote
 }
 
-func runAdd(ctx context.Context, env Env) error {
-	s := session{ctx: ctx, env: env}
-	p := prompt.New(env.In, env.Out)
-
-	hasManifest, err := manifest.Exists(env.Dir)
+func runAdd(s *session) error {
+	m, err := manifest.Load(s.env.Dir)
 	if err != nil {
 		return err
 	}
-	if !hasManifest {
-		return fmt.Errorf("no %s here, so this isn't an Ivaldi Project yet: run ivaldi init first", manifest.FileName)
-	}
-	m, err := manifest.Load(env.Dir)
-	if err != nil {
-		return err
-	}
-	modulePath, err := readModulePath(env.Dir)
+	modulePath, err := readModulePath(s.env.Dir)
 	if err != nil {
 		return err
 	}
 
-	s.sayf("=== Ivaldi: add binaries ===")
-	plan, err := planBinaries(p, env.Dir, modulePath, m, nil, false)
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, nil, false)
 	if err != nil {
 		return err
 	}
 
-	if err = scaffold.Write(env.Dir, env.Out, plan.files); err != nil {
+	if err = scaffold.Write(s.env.Dir, s.env.Out, plan.files); err != nil {
 		return err
 	}
-	if err = m.Save(env.Dir); err != nil {
+	if err = m.Save(s.env.Dir); err != nil {
 		return err
 	}
 	s.fetchModules(plan)
-
-	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
 	return nil
 }

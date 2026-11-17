@@ -8,13 +8,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/worldtree-industries/ivaldi/internal/prompt"
 	"github.com/worldtree-industries/ivaldi/internal/scaffold"
 )
 
 // askModulePath returns the module path of an existing go.mod, or asks for
 // one, defaulting from origin.
-func (s session) askModulePath(p *prompt.Prompter) (string, error) {
+func (s session) askModulePath() (string, error) {
 	hasGoMod, err := scaffold.Exists(s.env.Dir, "go.mod")
 	if err != nil {
 		return "", err
@@ -22,7 +21,7 @@ func (s session) askModulePath(p *prompt.Prompter) (string, error) {
 	if hasGoMod {
 		return readModulePath(s.env.Dir)
 	}
-	return p.Required("Module path", modulePathFromRemote(s.origin()))
+	return s.prompt.Required("Module path", modulePathFromRemote(s.origin()))
 }
 
 // modulePathFromRemote turns a git remote URL into a module path, for example
