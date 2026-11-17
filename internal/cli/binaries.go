@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -26,9 +25,7 @@ var binaryName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 // binaryPlan is everything the binaries prompt decided, before anything is
 // written.
 type binaryPlan struct {
-	prompt     *prompt.Prompter
-	out        io.Writer
-	dir        string
+	session    session
 	modulePath string
 	// manifest gets each planned binary added to it.
 	manifest *manifest.Manifest
@@ -37,8 +34,6 @@ type binaryPlan struct {
 	planned []scaffold.File
 
 	names []string
-	// discovered are the binaries already in cmd/ that were recorded.
-	discovered []string
 	// files are each binary's main and any extra files its Kind needs.
 	files []scaffold.File
 	// modules are the module queries to go get, without duplicates.
@@ -50,37 +45,22 @@ func (b *binaryPlan) empty() bool {
 	return len(b.names) == 0
 }
 
-// newBinaryPlan starts a plan that adds binaries to m. planned are files that
-// will be written in the same run, and count as existing.
-func newBinaryPlan(
-	p *prompt.Prompter, out io.Writer, dir, modulePath string, m *manifest.Manifest, planned []scaffold.File,
-) *binaryPlan {
-	return &binaryPlan{prompt: p, out: out, dir: dir, modulePath: modulePath, manifest: m, planned: planned}
+// newBinaryPlan starts a plan that adds binaries to m, in the Project with
+// modulePath. planned are files that will be written in the same run, and
+// count as existing.
+func (s session) newBinaryPlan(modulePath string, m *manifest.Manifest, planned []scaffold.File) *binaryPlan {
+	return &binaryPlan{session: s, modulePath: modulePath, manifest: m, planned: planned}
 }
 
-// planBinaries runs the binaries prompt: it asks for names, validates all of
-// them, then asks each one's Kind and the Kind's follow-up questions, and adds
-// each binary to m. It writes nothing. planned are files that will be written
-// in the same run, and count as existing. When allowNone is true, a blank
-// answer means no binaries.
-func planBinaries(
-	p *prompt.Prompter, out io.Writer, dir, modulePath string, m *manifest.Manifest, planned []scaffold.File,
-	allowNone bool,
-) (*binaryPlan, error) {
-	plan := newBinaryPlan(p, out, dir, modulePath, m, planned)
-	if err := plan.askNew(allowNone); err != nil {
-		return nil, err
-	}
-	return plan, nil
-}
-
-// askNew asks for new binaries' names, validates all of them, then plans each.
+// askNew asks for new binaries' names, validates all of them, then asks each
+// one's Kind and the Kind's follow-up questions, and plans it. It writes
+// nothing. When allowNone is true, a blank answer means no binaries.
 func (b *binaryPlan) askNew(allowNone bool) error {
-	names, err := askNames(b.prompt, allowNone)
+	names, err := askNames(b.session.prompt, allowNone)
 	if err != nil {
 		return err
 	}
-	if err = validateNames(b.dir, names, b.manifest.Binaries()); err != nil {
+	if err = validateNames(b.session.env.Dir, names, b.manifest.Binaries()); err != nil {
 		return err
 	}
 	for _, name := range names {
@@ -97,13 +77,13 @@ func (b *binaryPlan) exists(rel string) (bool, error) {
 	if slices.ContainsFunc(b.planned, isRel) || slices.ContainsFunc(b.files, isRel) {
 		return true, nil
 	}
-	return scaffold.Exists(b.dir, rel)
+	return scaffold.Exists(b.session.env.Dir, rel)
 }
 
 // ask asks name's Kind and the Kind's follow-up questions, and plans any extra
 // files the answers need.
 func (b *binaryPlan) ask(name string) (kind.Kind, []manifest.Setting, error) {
-	kindName, err := b.prompt.Choice("Kind of "+name, kind.Names())
+	kindName, err := b.session.prompt.Choice("Kind of "+name, kind.Names())
 	if err != nil {
 		return kind.Kind{}, nil, err
 	}
@@ -111,7 +91,7 @@ func (b *binaryPlan) ask(name string) (kind.Kind, []manifest.Setting, error) {
 
 	var answers kind.Answers
 	if k.Ask != nil {
-		q := &kind.Questions{Prompt: b.prompt, Binaries: b.manifest.Binaries(), Exists: b.exists}
+		q := &kind.Questions{Prompt: b.session.prompt, Binaries: b.manifest.Binaries(), Exists: b.exists}
 		if answers, err = k.Ask(q, name); err != nil {
 			return kind.Kind{}, nil, err
 		}
@@ -155,12 +135,11 @@ func (b *binaryPlan) record(d discoveredBinary) error {
 	switch {
 	case d.dockerfile && k.Deployable:
 		settings = append(settings, manifest.Setting{Key: manifest.SettingBuild, Value: manifest.BuildDockerfile})
-		_, _ = fmt.Fprintf(b.out, "cmd/%s/Dockerfile exists, so %s is recorded with %s: %s.\n",
+		b.session.sayf("cmd/%s/Dockerfile exists, so %s is recorded with %s: %s.",
 			d.name, d.name, manifest.SettingBuild, manifest.BuildDockerfile)
 	case d.dockerfile:
-		_, _ = fmt.Fprintf(
-			b.out,
-			"Warning: cmd/%s/Dockerfile isn't used: %s is a %s, and Tools aren't built into images.\n",
+		b.session.sayf(
+			"Warning: cmd/%s/Dockerfile isn't used: %s is a %s, and Tools aren't built into images.",
 			d.name,
 			d.name,
 			k.Name,
@@ -169,7 +148,6 @@ func (b *binaryPlan) record(d discoveredBinary) error {
 	if err = b.manifest.Add(d.name, k.Name, settings); err != nil {
 		return err
 	}
-	b.discovered = append(b.discovered, d.name)
 	return nil
 }
 

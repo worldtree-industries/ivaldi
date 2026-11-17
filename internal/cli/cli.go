@@ -187,7 +187,7 @@ func runInit(s *session) error {
 		return err
 	}
 	m := manifest.Empty()
-	plan := newBinaryPlan(s.prompt, s.env.Out, s.env.Dir, modulePath, m, files)
+	plan := s.newBinaryPlan(modulePath, m, files)
 	if len(found.binaries) > 0 {
 		s.sayf("Found existing binaries in cmd/: %s. Their code is left as it is.", found.names())
 	}
@@ -310,8 +310,8 @@ func runAdd(s *session) error {
 		return err
 	}
 
-	plan, err := planBinaries(s.prompt, s.env.Out, s.env.Dir, modulePath, m, nil, false)
-	if err != nil {
+	plan := s.newBinaryPlan(modulePath, m, nil)
+	if err = plan.askNew(false); err != nil {
 		return err
 	}
 
