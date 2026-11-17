@@ -1,5 +1,8 @@
-module ivaldi
+module github.com/worldtree-industries/ivaldi
 
-go 1.26.1
+go 1.27
 
-require gopkg.in/yaml.v3 v3.0.1 // indirect
+require (
+	github.com/robfig/cron/v3 v3.0.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
+)

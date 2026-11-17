@@ -1,0 +1,4 @@
+# Build output from make build.
+/bin/
+# Logs mjolnir writes under the working directory, e.g. from make run-<name>.
+/logs/

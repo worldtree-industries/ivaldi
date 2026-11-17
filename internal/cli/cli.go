@@ -1,142 +1,273 @@
-//nolint:forbidigo // This file is a cli UI intended to be used for user interaction, so fmt and os are appropriate here.
-package cli //nolint:cyclop // Complex logic for project initialization.
+// Package cli is Ivaldi's command boundary. Everything it needs from the
+// outside world (the Project directory, the input and output streams, and a
+// runner for external processes) is passed in through Env, so nothing below
+// it reads the working directory, stdin or stdout, or runs processes itself.
+package cli
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 
-	"ivaldi/internal/config"
-	"ivaldi/internal/prompt"
-	"ivaldi/internal/scaffold"
+	"github.com/worldtree-industries/ivaldi/internal/manifest"
+	"github.com/worldtree-industries/ivaldi/internal/prompt"
+	"github.com/worldtree-industries/ivaldi/internal/scaffold"
 )
 
-const (
-	choiceHTTP        = 0
-	choiceWorker      = 1
-	choiceCLI         = 2
-	choiceInteractive = 3
+// Command is one external process the command layer wants run.
+type Command struct {
+	// Dir is the directory the process runs in (always the Project directory).
+	Dir  string
+	Name string
+	Args []string
+}
+
+func (c Command) String() string {
+	return strings.Join(append([]string{c.Name}, c.Args...), " ")
+}
+
+// Runner runs external processes on behalf of the command layer.
+type Runner interface {
+	// Run runs cmd to completion and returns its standard output. A non-nil
+	// error means the process could not be started or exited unsuccessfully.
+	Run(ctx context.Context, cmd Command) ([]byte, error)
+}
+
+// Env is everything a command may use from the outside world.
+type Env struct {
+	// Dir is the Project directory.
+	Dir    string
+	In     io.Reader
+	Out    io.Writer
+	Runner Runner
+}
+
+// ErrUsage is returned when the arguments don't name a known command.
+var ErrUsage = errors.New("usage")
+
+const usage = `Usage: ivaldi <command>
+
+Commands:
+  init     Set up a new Project in the current directory
+  add      Add binaries to the Project in the current directory
+`
+
+// Run dispatches args (without the program name) to a command.
+func Run(ctx context.Context, env Env, args []string) error {
+	if len(args) == 1 {
+		switch args[0] {
+		case "init":
+			return initCommand.execute(ctx, env)
+		case "add":
+			return addCommand.execute(ctx, env)
+		}
+	}
+	if _, err := io.WriteString(env.Out, usage); err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		return fmt.Errorf("%w: no command given", ErrUsage)
+	}
+	return fmt.Errorf("%w: unknown command %q", ErrUsage, strings.Join(args, " "))
+}
+
+// command is init or add: what they share around their own steps.
+type command struct {
+	// title is shown when the command starts.
+	title string
+	// needsManifest is whether the Project must already have a Manifest. If
+	// it doesn't match, the command refuses with refusal before doing anything.
+	needsManifest bool
+	refusal       string
+	run           func(s *session) error
+}
+
+//nolint:gochecknoglobals // Constant command table.
+var (
+	initCommand = command{
+		title:         "new Project",
+		needsManifest: false,
+		refusal: manifest.FileName + " already exists, so this is already an Ivaldi Project: " +
+			"use ivaldi add to add binaries",
+		run: runInit,
+	}
+	addCommand = command{
+		title:         "add binaries",
+		needsManifest: true,
+		refusal:       "no " + manifest.FileName + " here, so this isn't an Ivaldi Project yet: run ivaldi init first",
+		run:           runAdd,
+	}
 )
 
-//nolint:gocognit,nestif,funlen // Complex project initialization logic is inherently nested.
-func Run(mode string, modulePrefix string) error {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		return fmt.Errorf("failed to load config: %w", err)
-	}
-
-	if modulePrefix != "" {
-		cfg.ModulePrefix = modulePrefix
-	}
-
-	cwd, err := os.Getwd()
+func (c command) execute(ctx context.Context, env Env) error {
+	hasManifest, err := manifest.Exists(env.Dir)
 	if err != nil {
 		return err
 	}
-	baseDirName := filepath.Base(cwd)
-
-	defaultModulePath := baseDirName
-	if cfg.ModulePrefix != "" {
-		defaultModulePath = filepath.Join(cfg.ModulePrefix, baseDirName)
+	if hasManifest != c.needsManifest {
+		return errors.New(c.refusal)
 	}
 
-	projectCfg := &scaffold.ProjectConfig{
-		GoVersion: "1.26",
+	s := &session{ctx: ctx, env: env, prompt: prompt.New(env.In, env.Out)}
+	s.sayf("=== Ivaldi: %s ===", c.title)
+	if err = c.run(s); err != nil {
+		return err
 	}
+	s.sayf("Done! Nothing has been committed: review the files, then commit them.")
+	return nil
+}
 
-	p := prompt.New(os.Stdin, os.Stdout)
+type session struct {
+	ctx    context.Context //nolint:containedctx // Scoped to a single command run.
+	env    Env
+	prompt *prompt.Prompter
+	// ownRepo is set when the Project directory was already the top level of
+	// a git work tree when the command started. Otherwise any repository it's
+	// in belongs to something else, and its origin isn't the Project's.
+	ownRepo bool
+}
 
-	if mode == "init" {
-		fmt.Println("=== Ivaldi Project Scaffold ===")
-		projectCfg.ModulePath = p.String("Module Path", defaultModulePath)
+func (s session) sayf(format string, a ...any) {
+	_, _ = fmt.Fprintf(s.env.Out, format+"\n", a...)
+}
 
-		fmt.Println("\nConfigure binaries (comma separated names). Leave blank to finish.")
-		binariesInput := p.String("Binaries", baseDirName)
+// command returns the Command for name and args, run in the Project directory.
+func (s session) command(name string, args ...string) Command {
+	return Command{Dir: s.env.Dir, Name: name, Args: args}
+}
 
-		var binaries []scaffold.Binary
-		for name := range strings.SplitSeq(binariesInput, ",") {
-			name = strings.TrimSpace(name)
-			if name == "" {
-				continue
-			}
-
-			opts := []string{
-				"HTTP Server (mjolnir + zerolog)",
-				"Background Worker (zerolog)",
-				"CLI Tool (standard library)",
-				"Interactive CLI",
-			}
-
-			choice := p.Select(fmt.Sprintf("Select type for binary '%s':", name), opts)
-
-			var binType string
-			switch choice {
-			case choiceHTTP:
-				binType = "http"
-			case choiceWorker:
-				binType = "worker"
-			case choiceCLI:
-				binType = "cli"
-			case choiceInteractive:
-				binType = "interactive"
-			}
-
-			binaries = append(binaries, scaffold.Binary{
-				Name: name,
-				Type: binType,
-			})
-		}
-		projectCfg.Binaries = binaries
-
-		projectCfg.SetupCI = p.Bool("Setup GitHub Actions CI?", false)
-
-		fmt.Println("\nInitializing go.mod...")
-		err = scaffold.InitGoMod(projectCfg.ModulePath)
-		if err != nil {
-			return fmt.Errorf("go mod init failed: %w", err)
-		}
-
-		fmt.Println("Creating directories...")
-		err = scaffold.CreateDirectories(projectCfg.Binaries)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println("Writing main.go files...")
-		err = scaffold.WriteMainFiles(projectCfg)
-		if err != nil {
-			return err
-		}
-
-		fmt.Println("Running go mod tidy to fetch dependencies...")
-		err = scaffold.RunGoModTidy()
-		if err != nil {
-			fmt.Printf("Warning: go mod tidy failed: %v\n", err)
-		}
-	} else {
-		// For update and clobber, we try to detect existing binaries from the Makefile or cmd/ dir
-		// We'll just infer binaries from the directories in cmd/
-		var entries []os.DirEntry
-		entries, err = os.ReadDir("cmd")
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() {
-					projectCfg.Binaries = append(projectCfg.Binaries, scaffold.Binary{
-						Name: entry.Name(),
-						Type: "cli", // Type doesn't matter for makefile generation except Name
-					})
-				}
-			}
-		}
+// exec runs cmd and returns its standard output, also echoing it to the user
+// when echo is set. The error is the runner's, unwrapped.
+func (s session) exec(cmd Command, echo bool) ([]byte, error) {
+	output, err := s.env.Runner.Run(s.ctx, cmd)
+	if echo && len(output) > 0 {
+		_, _ = s.env.Out.Write(output)
 	}
+	return output, err
+}
 
-	fmt.Printf("Writing tooling files (mode: %s)...\n", mode)
-	err = scaffold.WriteTooling(projectCfg, mode)
+// run runs a command, echoing its output to the user.
+func (s session) run(name string, args ...string) error {
+	cmd := s.command(name, args...)
+	if _, err := s.exec(cmd, true); err != nil {
+		return fmt.Errorf("%s: %w", cmd, err)
+	}
+	return nil
+}
+
+// output runs a command and returns its trimmed standard output.
+func (s session) output(name string, args ...string) (string, error) {
+	cmd := s.command(name, args...)
+	output, err := s.exec(cmd, false)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", cmd, err)
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func runInit(s *session) error {
+	s.ownRepo = s.isRepositoryTopLevel()
+	// Ask everything before changing anything, so a failed answer leaves the
+	// directory as it was.
+	modulePath, err := s.askModulePath()
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("Done!")
+	files, err := scaffold.Skeleton(modulePath)
+	if err != nil {
+		return err
+	}
+	m := manifest.Empty()
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, files, true)
+	if err != nil {
+		return err
+	}
+
+	if !s.ownRepo {
+		if err = s.run("git", "init"); err != nil {
+			return err
+		}
+	}
+	manifestFile, err := m.File()
+	if err != nil {
+		return err
+	}
+	// The Manifest goes last: once it exists, init refuses to run again.
+	files = append(append(files, plan.files...), manifestFile)
+	if err = scaffold.Write(s.env.Dir, s.env.Out, files); err != nil {
+		return err
+	}
+	if !plan.empty() {
+		s.fetchModules(plan)
+	}
+
+	s.applyGitHubSettings()
+	return nil
+}
+
+// isRepositoryTopLevel reports whether the Project directory is the top level
+// of a git work tree, not just somewhere inside one.
+func (s session) isRepositoryTopLevel() bool {
+	top, err := s.output("git", "rev-parse", "--show-toplevel")
+	if err != nil || top == "" {
+		return false
+	}
+	return sameDir(top, s.env.Dir)
+}
+
+// sameDir reports whether a and b are the same directory, after resolving
+// symlinks.
+func sameDir(a, b string) bool {
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		return false
+	}
+	return ra == rb
+}
+
+// origin returns the URL of the Project's origin remote, or "" when it has
+// none. A repository the Project is merely inside isn't the Project's, and one
+// init creates has no remotes, so neither has an origin.
+func (s session) origin() string {
+	if !s.ownRepo {
+		return ""
+	}
+	remote, err := s.output("git", "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return remote
+}
+
+func runAdd(s *session) error {
+	m, err := manifest.Load(s.env.Dir)
+	if err != nil {
+		return err
+	}
+	modulePath, err := readModulePath(s.env.Dir)
+	if err != nil {
+		return err
+	}
+
+	plan, err := planBinaries(s.prompt, s.env.Dir, modulePath, m, nil, false)
+	if err != nil {
+		return err
+	}
+
+	if err = scaffold.Write(s.env.Dir, s.env.Out, plan.files); err != nil {
+		return err
+	}
+	if err = m.Save(s.env.Dir); err != nil {
+		return err
+	}
+	s.fetchModules(plan)
 	return nil
 }

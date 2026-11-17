@@ -2,9 +2,10 @@ package prompt_test
 
 import (
 	"bytes"
-	"ivaldi/internal/prompt"
 	"strings"
 	"testing"
+
+	"github.com/worldtree-industries/ivaldi/internal/prompt"
 )
 
 func TestString(t *testing.T) {

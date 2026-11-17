@@ -1,60 +1,67 @@
+// Command ivaldi sets up and grows opinionated Go Projects.
+//
+// This is the only place that touches the process's working directory,
+// standard streams and exec; everything else goes through cli.Env.
 package main
 
 import (
-	"flag"
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"os/signal"
+	"strings"
+	"syscall"
 
-	"ivaldi/internal/cli"
+	"github.com/worldtree-industries/ivaldi/internal/cli"
 )
 
 func main() {
-	fs := flag.NewFlagSet("ivaldi", flag.ExitOnError)
+	os.Exit(run())
+}
 
-	var modulePrefix string
-	fs.StringVar(&modulePrefix, "p", "", "Default module path prefix (e.g. github.com/user)")
-	fs.StringVar(&modulePrefix, "module-prefix", "", "Default module path prefix")
+func run() int {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: %s [options] <command>\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "\nCommands:\n")
-		fmt.Fprintf(os.Stderr, "  init     Initialize a new Go project interactively\n")
-		fmt.Fprintf(os.Stderr, "  update   Safely update existing Makefile and .golangci.yml\n")
-		fmt.Fprintf(os.Stderr, "  clobber  Force overwrite Makefile, .golangci.yml, and CI\n")
-		fmt.Fprintf(os.Stderr, "\nOptions:\n")
-		fs.PrintDefaults()
-	}
-
-	if len(os.Args) < 2 { //nolint:mnd // Minimal arguments check
-		fs.Usage()
-		os.Exit(1)
-	}
-
-	// The first argument is the command (init, update, clobber), following by flags
-	// But standard flag package expects flags BEFORE positional args if using flag.Parse()
-	// However, we want 'ivaldi [flags] <command>' or 'ivaldi <command> [flags]'?
-	// The original code used flag.Parse() which expects flags before args.
-
-	if err := fs.Parse(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing flags: %v\n", err)
-		os.Exit(1)
-	}
-
-	args := fs.Args()
-	if len(args) == 0 {
-		fs.Usage()
-		os.Exit(1)
-	}
-
-	command := args[0]
-	if command != "init" && command != "update" && command != "clobber" {
-		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
-		fs.Usage()
-		os.Exit(1)
-	}
-
-	if err := cli.Run(command, modulePrefix); err != nil {
+	dir, err := os.Getwd()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
+
+	err = cli.Run(ctx, cli.Env{
+		Dir:    dir,
+		In:     os.Stdin,
+		Out:    os.Stdout,
+		Runner: execRunner{},
+	}, os.Args[1:])
+	if err != nil {
+		if !errors.Is(err, cli.ErrUsage) {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		}
+		return 1
+	}
+	return 0
+}
+
+// execRunner runs commands as real processes. On failure, stderr is included
+// in the returned error.
+type execRunner struct{}
+
+func (execRunner) Run(ctx context.Context, c cli.Command) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.Name, c.Args...) //nolint:gosec // Commands come from Ivaldi itself.
+	cmd.Dir = c.Dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return stdout.Bytes(), fmt.Errorf("%w: %s", err, msg)
+		}
+		return stdout.Bytes(), err
+	}
+	return stdout.Bytes(), nil
 }

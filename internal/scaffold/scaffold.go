@@ -1,117 +1,186 @@
+// Package scaffold writes Project files under an explicit Project directory.
+// It never reads the process's working directory, stdin or stdout, and never
+// runs external processes: the command layer does that through its runner.
 package scaffold
 
 import (
 	"bytes"
-	"context"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
+	"strings"
 	"text/template"
-	"time"
 
-	"ivaldi/internal/merge"
-	"ivaldi/internal/templates"
+	"github.com/worldtree-industries/ivaldi/internal/templates"
 )
-
-type Binary struct {
-	Name string
-	Type string // "http", "worker", "cli", "interactive"
-}
-
-type ProjectConfig struct {
-	ModulePath string
-	Binaries   []Binary
-	SetupCI    bool
-	GoVersion  string
-}
 
 const (
-	modeClobber    = "clobber"
-	commandTimeout = 30 * time.Second
+	dirPerm  = 0o755
+	filePerm = 0o644
 )
 
-func InitGoMod(modulePath string) error {
-	if _, err := os.Stat("go.mod"); err == nil {
-		//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-		fmt.Println("go.mod already exists, skipping init")
-		return nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", "mod", "init", modulePath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+// File is one file Ivaldi writes into a Project.
+type File struct {
+	// Path is relative to the Project directory, using forward slashes.
+	Path    string
+	Content []byte
+	// Managed marks a Managed file: identical in every Project, never edited by
+	// users, and kept current by a separate system. Any other file is
+	// Unmanaged: written once, then owned by the user. At init both kinds are
+	// written only if missing.
+	Managed bool
 }
 
-func CreateDirectories(binaries []Binary) error {
-	dirs := []string{"internal"}
-	for _, bin := range binaries {
-		dirs = append(dirs, filepath.Join("cmd", bin.Name))
+// Exists reports whether rel exists under the Project directory.
+func Exists(dir, rel string) (bool, error) {
+	_, err := os.Stat(filepath.Join(dir, rel))
+	if err == nil {
+		return true, nil
 	}
-
-	for _, dir := range dirs {
-		//nolint:gosec // We are creating directories in the current working directory, so this is safe
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return err
-		}
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
 	}
-	return nil
+	return false, err
 }
 
-func WriteMainFiles(config *ProjectConfig) error {
-	for _, bin := range binariesToTemplateData(config) {
-		path := filepath.Join("cmd", bin.Name, "main.go")
-		if _, err := os.Stat(path); err == nil {
-			//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-			fmt.Printf("File %s already exists, skipping...\n", path)
-			continue
-		}
+// The Layers, each a top-level package of the Project.
+const (
+	LayerAPI     = "api"
+	LayerService = "service"
+	LayerData    = "data"
+	LayerModels  = "models"
+	LayerClient  = "client"
+)
 
-		var tmplContent string
-		switch bin.Type {
-		case "http":
-			tmplContent = templates.MainHTTP
-		case "worker":
-			tmplContent = templates.MainWorker
-		case "cli":
-			tmplContent = templates.MainCLI
-		case "interactive":
-			tmplContent = templates.MainInteractive
-		default:
-			tmplContent = templates.MainCLI
-		}
+// rootLayers are the Layers every Project starts with. client is created only
+// on request, when the first http binary is added.
+//
+//nolint:gochecknoglobals // Constant list.
+var rootLayers = []string{LayerAPI, LayerService, LayerData, LayerModels}
 
-		tmpl, err := template.New("main").Parse(tmplContent)
-		if err != nil {
-			return err
-		}
+// SharedMakefilePath is where the Managed shared make file lives.
+const SharedMakefilePath = "ivaldi.mk"
 
-		var buf bytes.Buffer
-		if err = tmpl.Execute(&buf, map[string]string{
-			"ModulePath": config.ModulePath,
-			"BinaryName": bin.Name,
-		}); err != nil {
-			return err
-		}
-
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		if err = os.WriteFile(path, buf.Bytes(), 0644); err != nil {
-			return err
-		}
-	}
-	return nil
+// layerRule is one Layer's import rule, enforced by depguard.
+type layerRule struct {
+	Name   string
+	Denied []string // Layers it must not import.
+	Rule   string   // Human-readable rule, shown when lint fails.
 }
 
-func generateTemplate(name, content string, data any) ([]byte, error) {
-	tmpl, err := template.New(name).Parse(content)
+//nolint:gochecknoglobals // Constant table.
+var layerRules = []layerRule{
+	{
+		Name:   LayerAPI,
+		Denied: []string{LayerData, LayerClient},
+		Rule:   "api may import only service and models",
+	},
+	{
+		Name:   LayerService,
+		Denied: []string{LayerAPI, LayerClient},
+		Rule:   "service may import only data and models",
+	},
+	{
+		Name:   LayerData,
+		Denied: []string{LayerAPI, LayerService, LayerClient},
+		Rule:   "data may import only models",
+	},
+	{
+		Name:   LayerModels,
+		Denied: []string{LayerAPI, LayerService, LayerData, LayerClient},
+		Rule:   "models may not import any layer",
+	},
+	{
+		Name:   LayerClient,
+		Denied: []string{LayerAPI, LayerService, LayerData},
+		Rule:   "client may import only models",
+	},
+}
+
+// The release of worldtree-industries/workflows that the Managed CI workflow
+// calls. The workflow is pinned by SharedWorkflowSHA, so a moved tag can't
+// change what runs; SharedWorkflowVersion is only the comment beside it.
+// Update both together, from:
+//
+//	gh api repos/worldtree-industries/workflows/commits/<version> --jq .sha
+const (
+	SharedWorkflowSHA     = "e27aff84ed75bc3995068bce81b197c7dd6eafff"
+	SharedWorkflowVersion = "v1.0.0"
+)
+
+// CIPath is where the Managed CI caller workflow lives.
+const CIPath = ".github/workflows/ci.yml"
+
+// Skeleton returns the files of a new Project with no binaries.
+func Skeleton(modulePath string) ([]File, error) {
+	files := []File{
+		{Path: "go.mod", Content: fmt.Appendf(nil, "module %s\n\ngo 1.27\n", modulePath)},
+		{Path: "Makefile", Content: templates.Makefile},
+		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
+		{Path: CIPath, Content: ciWorkflow(), Managed: true},
+		{Path: ".gitignore", Content: templates.Gitignore},
+	}
+	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
+		"ModulePath": modulePath,
+		"Layers":     layerRules,
+	})
 	if err != nil {
 		return nil, err
 	}
+	files = append(files, File{Path: ".golangci.yml", Content: lintConfig})
 
+	readme, err := render("readme", templates.Readme, map[string]any{"Title": path.Base(modulePath)})
+	if err != nil {
+		return nil, err
+	}
+	files = append(files, File{Path: "README.md", Content: readme})
+
+	for _, layer := range rootLayers {
+		doc, docErr := LayerDoc(layer)
+		if docErr != nil {
+			return nil, docErr
+		}
+		files = append(files, doc)
+	}
+	return files, nil
+}
+
+// LayerDoc returns the doc file of the named Layer.
+func LayerDoc(layer string) (File, error) {
+	content, err := templates.Layers.ReadFile("layers/" + layer + ".go.tmpl")
+	if err != nil {
+		return File{}, fmt.Errorf("no doc file for layer %q: %w", layer, err)
+	}
+	return File{Path: layer + "/doc.go", Content: content}, nil
+}
+
+// Write writes each file that doesn't exist yet and never overwrites one that
+// does, reporting each skipped file on out.
+func Write(dir string, out io.Writer, files []File) error {
+	for _, f := range files {
+		if err := writeIfMissing(dir, out, f); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ciWorkflow() []byte {
+	return []byte(strings.NewReplacer(
+		"__SHARED_WORKFLOW_SHA__", SharedWorkflowSHA,
+		"__SHARED_WORKFLOW_VERSION__", SharedWorkflowVersion,
+	).Replace(templates.CI))
+}
+
+func render(name, content string, data any) ([]byte, error) {
+	tmpl, err := template.New(name).Option("missingkey=error").Parse(content)
+	if err != nil {
+		return nil, err
+	}
 	var buf bytes.Buffer
 	if err = tmpl.Execute(&buf, data); err != nil {
 		return nil, err
@@ -119,90 +188,19 @@ func generateTemplate(name, content string, data any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func WriteTooling(config *ProjectConfig, mode string) error {
-	// mode: "init", "update", "clobber"
-
-	// 1. Makefile
-	makefileContent, err := generateTemplate("makefile", templates.Makefile, config)
+func writeIfMissing(dir string, out io.Writer, f File) error {
+	exists, err := Exists(dir, f.Path)
 	if err != nil {
 		return err
 	}
-	if err = writeOrMerge("Makefile", makefileContent, mode, merge.Makefile); err != nil {
+	if exists {
+		_, err = fmt.Fprintf(out, "File %s already exists, skipping...\n", f.Path)
 		return err
 	}
 
-	// 2. golangci.yml
-	if err = writeOrMerge(".golangci.yml", []byte(templates.GolangCI), mode, merge.YAML); err != nil {
+	path := filepath.Join(dir, filepath.FromSlash(f.Path))
+	if err = os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return err
 	}
-
-	// 3. CI
-	if config.SetupCI || mode == modeClobber {
-		var ciContent []byte
-		ciContent, err = generateTemplate("ci", templates.CI, config)
-		if err != nil {
-			return err
-		}
-		//nolint:gosec // We are creating directories in the current working directory, so this is safe
-		if err = os.MkdirAll(filepath.Join(".github", "workflows"), 0755); err != nil {
-			return err
-		}
-
-		// For CI, we generally don't merge, just replace if clobber, or skip if init and exists
-		ciPath := filepath.Join(".github", "workflows", "ci.yml")
-		if mode == modeClobber {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			_ = os.WriteFile(ciPath, ciContent, 0644)
-		} else if _, err = os.Stat(ciPath); os.IsNotExist(err) {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			_ = os.WriteFile(ciPath, ciContent, 0644)
-		}
-	}
-
-	return nil
-}
-
-func writeOrMerge(path string, srcContent []byte, mode string, mergeFunc func(dst, src []byte) ([]byte, error)) error {
-	if mode == modeClobber {
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		return os.WriteFile(path, srcContent, 0644)
-	}
-
-	existing, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			//nolint:gosec // We are creating files in the current working directory, so this is safe
-			return os.WriteFile(path, srcContent, 0644)
-		}
-		return err
-	}
-
-	if mode == "update" {
-		var merged []byte
-		merged, err = mergeFunc(existing, srcContent)
-		if err != nil {
-			return err
-		}
-		//nolint:gosec // We are creating files in the current working directory, so this is safe
-		return os.WriteFile(path, merged, 0644)
-	}
-
-	// init mode: skip if exists
-	//nolint:forbidigo // This is a CLI tool, so using fmt for user feedback is appropriate
-	fmt.Printf("File %s already exists, skipping...\n", path)
-	return nil
-}
-
-func binariesToTemplateData(config *ProjectConfig) []Binary {
-	return config.Binaries
-}
-
-func RunGoModTidy() error {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "go", "mod", "tidy")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return os.WriteFile(path, f.Content, filePerm)
 }

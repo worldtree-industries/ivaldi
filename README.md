@@ -1,99 +1,132 @@
 # Ivaldi
 
-Ivaldi is an opinionated, interactive CLI tool for scaffolding and maintaining Go projects. It sets up standard project structures, configures linters and CI, and provides tailored templates for different types of Go binaries.
+Ivaldi sets up and grows opinionated Go Projects. `ivaldi init` creates a Project's skeleton, and `ivaldi add` adds binaries to it over time.
 
-## Overview
-
-When you start a new Go project, there is often a lot of boilerplate involved. Ivaldi handles this by generating a standard project layout, an interactive Makefile, GitHub Actions for CI, and a strict `golangci-lint` configuration based on [maratori's golden config](https://github.com/maratori/golangci-lint-config).
-
-It also allows you to define multiple binaries within the same project and select tailored templates for each, including HTTP servers (using `mjolnir`), background workers, and CLI tools.
+Ivaldi is stateless. It has no config file and no flags, and it keeps nothing outside the Project. Everything it needs comes from the Project directory and your answers to its prompts.
 
 ## Installation
 
-To install Ivaldi, simply use `go install`:
-
 ```bash
-go install github.com/your-username/ivaldi/cmd/ivaldi@latest
+go install github.com/worldtree-industries/ivaldi/cmd/ivaldi@latest
 ```
 
-Ensure your `$(go env GOPATH)/bin` directory is in your system's `PATH`.
-
-## Configuration
-
-Ivaldi can read a default module path prefix from a configuration file so you don't have to type it out every time you initialize a new project.
-
-Create a configuration file at `~/.config/ivaldi/config.yaml` (or the equivalent user config directory on your OS):
-
-```yaml
-module_prefix: "github.com/your-username"
-```
-
-You can also override this on the fly using the `-p` or `--module-prefix` flag:
-
-```bash
-ivaldi -p github.com/workorg init
-```
+Make sure `$(go env GOPATH)/bin` is on your `PATH`.
 
 ## Commands
 
-Ivaldi provides three primary subcommands to manage the lifecycle of your project's tooling:
+Both commands work on the current directory, take no arguments and ask everything interactively. Neither commits anything: review the files, then commit them yourself.
 
-### `init`
+### `ivaldi init`
 
-The `init` command is used to bootstrap a brand new project. It runs interactively and will:
+Sets up a new Project in the current directory:
 
-1. Prompt for your module path (defaulting to your configured prefix + the current directory name).
-2. Ask for a comma-separated list of binaries you plan to build.
-3. Prompt you to select a template for each binary:
-   * **HTTP Server:** Sets up a `chi` router using `mjolnir`, configures `zerolog`, and scaffolds `/health`, `/live`, and `/ready` endpoints.
-   * **Background Worker:** Configures `zerolog` and sets up a standard context-based worker loop with graceful shutdown.
-   * **CLI Tool:** A basic template utilizing the standard library `flag` package.
-   * **Interactive CLI:** A template demonstrating an interactive `bufio.Scanner` loop.
-4. Optionally set up GitHub Actions CI.
-5. Initialize the `go.mod`, generate the boilerplate code in `cmd/`, and write out the `Makefile` and `.golangci.yml`.
+1. Refuses to run if `.forge.yaml` already exists (use `ivaldi add` instead).
+2. Asks for the module path, unless there's already a `go.mod`, whose module path it uses. The default comes from the `origin` remote (`git@github.com:org/repo.git` becomes `github.com/org/repo`). With no remote there's no default.
+3. Asks for binaries, exactly as `ivaldi add` does. A blank answer creates a Project with no binaries yet.
+4. Runs `git init` unless the directory is already the top level of a git repository. A directory inside another repository (a subdirectory of a monorepo, say) gets its own repository, and the outer repository's `origin` is never used for the module path or GitHub settings.
+5. Writes the Project files, skipping any file that already exists. It never overwrites anything, so you can run it in a partly set-up repository.
+6. Applies GitHub repository settings (see [GitHub settings](#github-settings)).
 
-```bash
-ivaldi init
+### `ivaldi add`
+
+Adds binaries to an existing Project. It refuses to run without a `.forge.yaml` (run `ivaldi init` first).
+
+1. Asks for a comma-separated list of binary names, for example `web, nightly, cli`.
+2. Checks every name before writing anything. A name must be lowercase, start with a letter, use only letters, digits and hyphens, and be at most 63 characters long. It must not appear twice in the list, already be in the Manifest, or already have a `cmd/<name>/` directory. If any name fails, nothing is written and the error names the bad entry.
+3. Asks for each binary's Kind, plus that Kind's questions (below). Invalid answers are asked again.
+4. Writes each binary's `main` package to `cmd/<name>/main.go` and adds the binary to the Manifest.
+5. Fetches the latest mjolnir when a new binary needs it, and runs `go mod tidy`. If either fails (for example, offline), `add` still succeeds: the files are written, and it warns and prints the commands to run later. `init` does the same when you add binaries during `init`.
+
+To remove or rename a binary, delete its `cmd/<name>/` directory and its Manifest entry by hand.
+
+## Kinds
+
+A binary's Kind decides its Template, and whether it's a Deployable (packaged into a container image and deployed) or a Tool (installed on developers' machines). The Kinds are built into Ivaldi.
+
+| Kind   | Is a       | Asks for                                                    |
+|--------|------------|-------------------------------------------------------------|
+| `http` | Deployable | a port, and (for the first `http` binary) a `client` Layer  |
+| `job`  | Deployable | a schedule                                                  |
+| `tool` | Tool       | nothing                                                     |
+
+- **`http`** is a long-running HTTP server built on [mjolnir](https://github.com/dfryer1193/mjolnir). It has mjolnir's router with built-in liveness, readiness and startup probes, safe server defaults, a graceful drain on SIGTERM and mjolnir's logger. It listens on `PORT`, falling back to the port chosen during `add`. That port defaults to the next free one from 8080 in the Manifest, must be from 1024 to 65535, and must be unique within the Project. The generated readiness check reports not-ready until you implement it, so it can't be forgotten.
+- **`job`** runs once to completion. It calls a single `run(ctx) error`, with a context that's cancelled on SIGINT or SIGTERM, logs through mjolnir's logger and exits with code 1 on error. Its schedule is `hourly`, `daily`, `weekly`, `monthly`, `none` (the default: run once) or a 5-field cron expression. Keywords stay keywords in the Manifest.
+- **`tool`** uses the standard `flag` package and plain terminal output, and supports `-version` from the build info. Tools are distributed only with `go install <module>/cmd/<name>@<version>`.
+
+## Layers
+
+`init` creates four Layers as top-level packages, each with a doc comment explaining its role. There's no `internal` directory.
+
+| Layer     | Role                                                    | May import          |
+|-----------|---------------------------------------------------------|---------------------|
+| `api`     | Inbound requests: transport, routing, request shapes    | `service`, `models` |
+| `service` | Business logic                                          | `data`, `models`    |
+| `data`    | Persistent state and external stores                    | `models`            |
+| `models`  | Domain types                                            | no Layer            |
+| `client`  | How other Projects call this one (optional)             | `models`            |
+
+`cmd/*` may import any Layer: each binary's `main` is where the Layers are wired together. The `client` Layer is created only if you say yes when adding the Project's first `http` binary. Lint enforces these rules with depguard. Other Projects should import only `models` and `client`, but that's by convention and isn't enforced.
+
+## The Manifest: `.forge.yaml`
+
+The Manifest records every binary, its Kind and its settings. It's the source of truth: Ivaldi only appends to it, keeping your entries, comments and ordering, and you may edit it. CI reads it to build Deployables, and Brokkr will read it to deploy them. Edits take effect in CI with nothing to regenerate.
+
+```yaml
+version: 1
+binaries:
+  web:
+    kind: http
+    port: 8080
+  nightly:
+    kind: job
+    schedule: daily
+    base_image: registry.example.com/base:with-tools  # optional, Deployables only
+  cli:
+    kind: tool
 ```
 
-### `update`
+Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unless `base_image` says otherwise. Set `build: dockerfile` on a Deployable to build it from your own `cmd/<name>/Dockerfile` instead. Ivaldi never generates one.
 
-The `update` command safely injects new configurations into an existing project.
+## Managed and Unmanaged files
 
-* **Makefile:** It parses your existing Makefile and appends any missing standard targets (like `build`, `run`, `install`) without modifying your custom targets.
-* **.golangci.yml:** It performs a deep merge of the latest golden config into your existing lint configuration, preserving any custom overrides or rules you have added.
+**Managed files** are identical in every Project and you shouldn't edit them. Ivaldi writes them at `init`; keeping them current afterwards is a separate system's job.
 
-```bash
-ivaldi update
-```
+- `ivaldi.mk`: the shared make targets `lint`, `test`, `build`, `run-<name>` and `install`. Binaries are discovered from `cmd/` each time make runs.
+- `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets and runs with read-only permissions.
 
-### `clobber`
+**Unmanaged files** are written once, if missing, and then belong to you. Ivaldi never touches them again.
 
-The `clobber` command forcefully replaces the `Makefile`, `.golangci.yml`, and `.github/workflows/ci.yml` with the latest embedded templates from Ivaldi.
+- `Makefile`, which includes `ivaldi.mk`. Add your own targets here.
+- `.golangci.yml`: [maratori's golden config](https://github.com/maratori/golangci-lint-config) plus the Layer rules
+- `README.md` skeleton, `.gitignore`, `go.mod` (Go 1.27)
+- each Layer's `doc.go`
+- each `cmd/<name>/main.go`
+- `.forge.yaml` (Ivaldi only ever appends to it)
 
-This is a destructive command for the tooling files, but it strictly ignores your application code in `cmd/` and `internal/` to ensure your business logic is never overwritten.
+## CI and images
 
-```bash
-ivaldi clobber
-```
+The shared workflow lints with golangci-lint, runs `go test -race ./...`, and builds the Deployables affected by a change:
 
-## Project Structure
+- Pull requests build images without pushing them.
+- Pushes to `main` push affected Deployables tagged `sha-<short>`.
+- A `vX.Y.Z` tag pushes the Deployables affected since the previous tag, tagged `vX.Y.Z`.
 
-Ivaldi enforces a standard Go project layout:
+A Deployable is affected when a Go package it depends on changes, its Manifest entry or base image changes, or its Dockerfile changes. Any change to `go.mod` or `go.sum` affects every Deployable. Images go to `registry.werewolves.fyi/library/<binary>`, using org-level Harbor secrets. Tools are never built as images.
 
-```
-.
-├── cmd/
-│   ├── api/
-│   │   └── main.go       # Entrypoint for the 'api' binary
-│   └── worker/
-│       └── main.go       # Entrypoint for the 'worker' binary
-├── internal/             # Private application code
-├── .github/
-│   └── workflows/
-│       └── ci.yml        # GitHub Actions configuration
-├── .golangci.yml         # Strict linter configuration
-├── go.mod
-├── go.sum
-└── Makefile              # Generated build and run targets
-```
+## GitHub settings
+
+As its last step, `init` applies three settings to the Project's GitHub repository:
+
+- Only GitHub-owned actions, `worldtree-industries/*` and the third-party actions the shared workflow uses may run.
+- The default `GITHUB_TOKEN` is read-only.
+- GitHub Actions may not create or approve pull requests.
+
+This needs `origin` to point at GitHub and `gh` to be authenticated with admin rights on the repository. If it can't apply them (offline, no repository yet, no rights), `init` still succeeds: it warns and prints the exact `gh` commands to run later. `add` never touches GitHub settings, and Ivaldi never creates repositories or secrets.
+
+## Developing Ivaldi
+
+Ivaldi is its own Project: its `.forge.yaml` declares `ivaldi` as a `tool`, and its `ci.yml` and `ivaldi.mk` are the ones `init` generates. Its Unmanaged `Makefile` adds an `e2e` target. `.github/workflows/e2e.yml` (Unmanaged) also runs the end-to-end tests.
+
+- `make test` runs the unit tests. They run offline.
+- `make e2e` builds the real binary, generates a Project with one binary of each Kind, and requires it to build, vet and lint. It needs the network, Go 1.27, and `golangci-lint` v2 and `actionlint` on `PATH`. Tests that need a missing linter are skipped, unless `IVALDI_REQUIRE_LINTERS=1` is set, which makes them fail instead (CI sets it).
+- `make lint` runs golangci-lint. Also run `golangci-lint run --build-tags e2e` to lint the e2e tests.
