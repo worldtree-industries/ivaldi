@@ -24,9 +24,6 @@ var layersAndCmd = []string{
 	scaffold.LayerAPI, scaffold.LayerService, scaffold.LayerData, scaffold.LayerModels, scaffold.LayerClient, "cmd",
 }
 
-// gitignorePath is the Project's .gitignore.
-const gitignorePath = ".gitignore"
-
 // discoveredBinary is a cmd/<name>/ directory that already holds package main.
 type discoveredBinary struct {
 	name string
@@ -122,7 +119,7 @@ func skippedDir(path, name string) bool {
 	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || name == "vendor" || name == "testdata" {
 		return true
 	}
-	_, err := os.Stat(filepath.Join(path, "go.mod"))
+	_, err := os.Stat(filepath.Join(path, scaffold.GoModPath))
 	return err == nil
 }
 
@@ -169,25 +166,6 @@ func readPackages(dir string) (bool, bool, error) {
 	return hasGo, false, nil
 }
 
-// keptWarnings say what keeping each existing file means, for the files init
-// asks about overwriting.
-//
-//nolint:gochecknoglobals // Constant table.
-var keptWarnings = map[string]string{
-	"Makefile":                  "add include " + scaffold.SharedMakefilePath + " to it yourself",
-	scaffold.SharedMakefilePath: "the shared make targets may be missing or out of date",
-	scaffold.CIPath:             "no shared CI",
-	scaffold.PreCommitHookPath:  "no pre-commit hook, and core.hooksPath isn't set",
-	".golangci.yml":             "the Layer rules aren't enforced",
-}
-
-// neverOverwritten reports whether rel is a file init keeps without asking
-// when it exists: go.mod (its module path is used), the README and each
-// Layer's doc.go.
-func neverOverwritten(rel string) bool {
-	return rel == "go.mod" || rel == "README.md" || strings.HasSuffix(rel, "/doc.go")
-}
-
 // askOverwrites lists each of files that already exists and that init would
 // otherwise skip, then asks whether to overwrite each one (default no, and end
 // of input is no), marking those to overwrite. It returns whether the
@@ -195,7 +173,7 @@ func neverOverwritten(rel string) bool {
 func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 	var existing []int
 	for i, f := range files {
-		if neverOverwritten(f.Path) || f.Path == gitignorePath {
+		if f.IfExists != scaffold.AskToOverwrite {
 			continue
 		}
 		exists, err := scaffold.Exists(s.env.Dir, f.Path)
@@ -227,8 +205,8 @@ func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 		if f.Path == scaffold.PreCommitHookPath {
 			ourHook = false
 		}
-		warning, ok := keptWarnings[f.Path]
-		if !ok {
+		warning := f.KeptWarning
+		if warning == "" {
 			warning = "it may not match what Ivaldi expects"
 		}
 		s.sayf("Warning: keeping your %s: %s.", f.Path, warning)
@@ -236,14 +214,24 @@ func (s session) askOverwrites(files []scaffold.File) (bool, error) {
 	return ourHook, nil
 }
 
-// planGitignore plans appending to an existing .gitignore the lines of
-// Ivaldi's that it lacks, without asking.
-func (s session) planGitignore(files []scaffold.File) error {
-	i := slices.IndexFunc(files, func(f scaffold.File) bool { return f.Path == gitignorePath })
-	if i < 0 {
-		return nil
+// planAppends plans appending to each existing file that takes it the lines
+// of Ivaldi's that it lacks, without asking.
+func (s session) planAppends(files []scaffold.File) error {
+	for i := range files {
+		if files[i].IfExists != scaffold.AppendMissingLines {
+			continue
+		}
+		if err := s.planAppend(&files[i]); err != nil {
+			return err
+		}
 	}
-	content, err := os.ReadFile(filepath.Join(s.env.Dir, gitignorePath))
+	return nil
+}
+
+// planAppend plans appending to f, if it exists, the lines of f's content
+// that it lacks.
+func (s session) planAppend(f *scaffold.File) error {
+	content, err := os.ReadFile(filepath.Join(s.env.Dir, filepath.FromSlash(f.Path)))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -255,7 +243,7 @@ func (s session) planGitignore(files []scaffold.File) error {
 		have[strings.TrimSpace(line)] = true
 	}
 	var missing []string
-	for line := range strings.SplitSeq(string(files[i].Content), "\n") {
+	for line := range strings.SplitSeq(string(f.Content), "\n") {
 		if line != "" && !strings.HasPrefix(line, "#") && !have[line] {
 			missing = append(missing, line)
 		}
@@ -267,8 +255,8 @@ func (s session) planGitignore(files []scaffold.File) error {
 		content = append(content, '\n')
 	}
 	content = append(content, strings.Join(missing, "\n")+"\n"...)
-	files[i].Content = content
-	files[i].Overwrite = true
-	s.sayf("Appending %s to %s.", strings.Join(missing, ", "), gitignorePath)
+	f.Content = content
+	f.Overwrite = true
+	s.sayf("Appending %s to %s.", strings.Join(missing, ", "), f.Path)
 	return nil
 }

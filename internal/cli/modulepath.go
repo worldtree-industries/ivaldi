@@ -16,7 +16,7 @@ import (
 // askModulePath returns the module path of an existing go.mod, or asks for
 // one, defaulting from origin.
 func (s session) askModulePath() (string, error) {
-	hasGoMod, err := scaffold.Exists(s.env.Dir, "go.mod")
+	hasGoMod, err := scaffold.Exists(s.env.Dir, scaffold.GoModPath)
 	if err != nil {
 		return "", err
 	}
@@ -56,7 +56,7 @@ func modulePathFromRemote(remote string) string {
 
 // readModulePath returns the module path declared in the Project's go.mod.
 func readModulePath(dir string) (string, error) {
-	content, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+	content, err := os.ReadFile(filepath.Join(dir, scaffold.GoModPath))
 	if err != nil {
 		return "", fmt.Errorf("reading the module path: %w", err)
 	}
@@ -77,7 +77,7 @@ const minGoVersion = "1.27"
 // askGoLine asks whether to raise an existing go.mod's go line when it's
 // below minGoVersion, defaulting to yes. It returns whether to raise it.
 func (s session) askGoLine() (bool, error) {
-	content, err := os.ReadFile(filepath.Join(s.env.Dir, "go.mod"))
+	content, err := os.ReadFile(filepath.Join(s.env.Dir, scaffold.GoModPath))
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}

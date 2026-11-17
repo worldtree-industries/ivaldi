@@ -34,12 +34,32 @@ type File struct {
 	// Unmanaged: written once, then owned by the user. At init both kinds are
 	// written only if missing, unless the user agrees to overwrite them.
 	Managed bool
-	// Executable makes the file executable, for scripts such as git hooks.
-	Executable bool
+	// Mode is the file's permissions, such as 0o755 for a script. Zero means
+	// 0o644.
+	Mode fs.FileMode
 	// Overwrite writes the file even if it exists: only for a file the user
 	// agreed to overwrite.
 	Overwrite bool
+	// IfExists is what Adoption does when the file already exists.
+	IfExists IfExists
+	// KeptWarning says what keeping the existing file means, for a file
+	// Adoption asks about.
+	KeptWarning string
 }
+
+// IfExists is what Adoption does with a file that already exists.
+type IfExists int
+
+const (
+	// AskToOverwrite asks whether to overwrite it, default no, and warns with
+	// the File's KeptWarning when it's kept.
+	AskToOverwrite IfExists = iota
+	// Keep keeps it without asking.
+	Keep
+	// AppendMissingLines appends the lines of the File's content that it
+	// lacks, without asking.
+	AppendMissingLines
+)
 
 // Exists reports whether rel exists under the Project directory.
 func Exists(dir, rel string) (bool, error) {
@@ -68,8 +88,16 @@ const (
 //nolint:gochecknoglobals // Constant list.
 var rootLayers = []string{LayerAPI, LayerService, LayerData, LayerModels}
 
-// SharedMakefilePath is where the Managed shared make file lives.
-const SharedMakefilePath = "ivaldi.mk"
+// The paths of the Project's root files.
+const (
+	GoModPath      = "go.mod"
+	MakefilePath   = "Makefile"
+	LintConfigPath = ".golangci.yml"
+	ReadmePath     = "README.md"
+	GitignorePath  = ".gitignore"
+	// SharedMakefilePath is where the Managed shared make file lives.
+	SharedMakefilePath = "ivaldi.mk"
+)
 
 // layerRule is one Layer's import rule, enforced by depguard.
 type layerRule struct {
@@ -131,12 +159,22 @@ const (
 // Skeleton returns the files of a new Project with no binaries.
 func Skeleton(modulePath string) ([]File, error) {
 	files := []File{
-		{Path: "go.mod", Content: fmt.Appendf(nil, "module %s\n\ngo 1.27\n", modulePath)},
-		{Path: "Makefile", Content: templates.Makefile},
-		{Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true},
-		{Path: CIPath, Content: ciWorkflow(), Managed: true},
-		{Path: PreCommitHookPath, Content: templates.PreCommit, Managed: true, Executable: true},
-		{Path: ".gitignore", Content: templates.Gitignore},
+		// Its module path is used, so it's always kept.
+		{Path: GoModPath, Content: fmt.Appendf(nil, "module %s\n\ngo 1.27\n", modulePath), IfExists: Keep},
+		{
+			Path: MakefilePath, Content: templates.Makefile,
+			KeptWarning: "add include " + SharedMakefilePath + " to it yourself",
+		},
+		{
+			Path: SharedMakefilePath, Content: templates.SharedMakefile, Managed: true,
+			KeptWarning: "the shared make targets may be missing or out of date",
+		},
+		{Path: CIPath, Content: ciWorkflow(), Managed: true, KeptWarning: "no shared CI"},
+		{
+			Path: PreCommitHookPath, Content: templates.PreCommit, Managed: true, Mode: execPerm,
+			KeptWarning: "no pre-commit hook, and core.hooksPath isn't set",
+		},
+		{Path: GitignorePath, Content: templates.Gitignore, IfExists: AppendMissingLines},
 	}
 	lintConfig, err := render("golangci", templates.GolangCI, map[string]any{
 		"ModulePath": modulePath,
@@ -145,13 +183,16 @@ func Skeleton(modulePath string) ([]File, error) {
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, File{Path: ".golangci.yml", Content: lintConfig})
+	files = append(
+		files,
+		File{Path: LintConfigPath, Content: lintConfig, KeptWarning: "the Layer rules aren't enforced"},
+	)
 
 	readme, err := render("readme", templates.Readme, map[string]any{"Title": path.Base(modulePath)})
 	if err != nil {
 		return nil, err
 	}
-	files = append(files, File{Path: "README.md", Content: readme})
+	files = append(files, File{Path: ReadmePath, Content: readme, IfExists: Keep})
 
 	for _, layer := range rootLayers {
 		doc, docErr := LayerDoc(layer)
@@ -169,7 +210,7 @@ func LayerDoc(layer string) (File, error) {
 	if err != nil {
 		return File{}, fmt.Errorf("no doc file for layer %q: %w", layer, err)
 	}
-	return File{Path: layer + "/doc.go", Content: content}, nil
+	return File{Path: layer + "/doc.go", Content: content, IfExists: Keep}, nil
 }
 
 // Write writes each file that doesn't exist yet, reporting each skipped file
@@ -221,9 +262,9 @@ func writeIfMissing(dir string, out io.Writer, f File) error {
 	if err = os.MkdirAll(filepath.Dir(path), dirPerm); err != nil {
 		return err
 	}
-	perm := fs.FileMode(filePerm)
-	if f.Executable {
-		perm = execPerm
+	perm := f.Mode
+	if perm == 0 {
+		perm = filePerm
 	}
 	if err = os.WriteFile(path, f.Content, perm); err != nil {
 		return err

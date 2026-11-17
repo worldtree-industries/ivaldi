@@ -203,7 +203,7 @@ func runInit(s *session) error {
 	if err != nil {
 		return err
 	}
-	if err = s.planGitignore(files); err != nil {
+	if err = s.planAppends(files); err != nil {
 		return err
 	}
 	raiseGoLine, err := s.askGoLine()
