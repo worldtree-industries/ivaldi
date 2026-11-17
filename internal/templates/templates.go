@@ -24,7 +24,11 @@ var SharedMakefile []byte
 //go:embed gitignore
 var Gitignore []byte
 
-//go:embed ci.tmpl
+// CI is the Managed CI caller workflow. Its pin of the shared workflow is
+// filled in from scaffold.SharedWorkflowSHA and scaffold.SharedWorkflowVersion
+// in place of __SHARED_WORKFLOW_SHA__ and __SHARED_WORKFLOW_VERSION__.
+//
+//go:embed ci.yml
 var CI string
 
 // Readme is the Unmanaged README skeleton template.
