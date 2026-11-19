@@ -17,17 +17,28 @@ func allowedActionPatterns() []string {
 	}
 }
 
+// releaseLabels are the pull request labels that ask the shared workflow for
+// a bigger release than a patch, with their descriptions.
+func releaseLabels() [][2]string {
+	return [][2]string{
+		{"semver:minor", "Merging releases a new minor version"},
+		{"semver:major", "Merging releases a new major version"},
+	}
+}
+
 // githubSettingsCommands returns the gh commands that apply Ivaldi's repo
 // settings to the GitHub repo repo ("owner/name"): only selected actions may
-// run, the default GITHUB_TOKEN is read-only, and Actions can't approve pull
-// requests.
+// run, the default GITHUB_TOKEN is read-only, Actions can't approve pull
+// requests, pull requests merge only as merge commits with GitHub's default
+// subject (which names the pull request the shared workflow releases), and
+// the release labels exist.
 func githubSettingsCommands(repo string) [][]string {
 	base := "repos/" + repo + "/actions/permissions"
 	selected := []string{"-F", "github_owned_allowed=true", "-F", "verified_allowed=false"}
 	for _, p := range allowedActionPatterns() {
 		selected = append(selected, "-f", "patterns_allowed[]="+p)
 	}
-	return [][]string{
+	commands := [][]string{
 		ghPut(base, "-F", "enabled=true", "-f", "allowed_actions=selected"),
 		ghPut(base+"/selected-actions", selected...),
 		ghPut(
@@ -37,7 +48,21 @@ func githubSettingsCommands(repo string) [][]string {
 			"-F",
 			"can_approve_pull_request_reviews=false",
 		),
+		{
+			"api", "--method", "PATCH", "repos/" + repo,
+			"-F", "allow_merge_commit=true",
+			"-F", "allow_squash_merge=false",
+			"-F", "allow_rebase_merge=false",
+			"-f", "merge_commit_title=MERGE_MESSAGE",
+			"-f", "merge_commit_message=PR_TITLE",
+		},
 	}
+	for _, l := range releaseLabels() {
+		commands = append(commands, []string{
+			"label", "create", l[0], "--repo", repo, "--force", "--color", "0e8a16", "--description", l[1],
+		})
+	}
+	return commands
 }
 
 // ghPut returns the gh arguments for a PUT to the GitHub API path with fields.

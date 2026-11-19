@@ -863,6 +863,13 @@ func githubSettings() []string {
 			" -f patterns_allowed[]=docker/build-push-action@*",
 		"gh api --method PUT repos/acme/widget/actions/permissions/workflow" +
 			" -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false",
+		"gh api --method PATCH repos/acme/widget" +
+			" -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false" +
+			" -f merge_commit_title=MERGE_MESSAGE -f merge_commit_message=PR_TITLE",
+		"gh label create semver:minor --repo acme/widget --force --color 0e8a16" +
+			" --description Merging releases a new minor version",
+		"gh label create semver:major --repo acme/widget --force --color 0e8a16" +
+			" --description Merging releases a new major version",
 	}
 }
 
@@ -891,6 +898,9 @@ func TestInitWarnsWithCommandsWhenGitHubSettingsCannotBeApplied(t *testing.T) {
 	const repoCommands = `  gh api --method PUT repos/acme/widget/actions/permissions -F enabled=true -f allowed_actions=selected
   gh api --method PUT repos/acme/widget/actions/permissions/selected-actions -F github_owned_allowed=true -F verified_allowed=false -f 'patterns_allowed[]=worldtree-industries/*' -f 'patterns_allowed[]=golangci/golangci-lint-action@*' -f 'patterns_allowed[]=docker/login-action@*' -f 'patterns_allowed[]=docker/setup-buildx-action@*' -f 'patterns_allowed[]=docker/build-push-action@*'
   gh api --method PUT repos/acme/widget/actions/permissions/workflow -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
+  gh api --method PATCH repos/acme/widget -F allow_merge_commit=true -F allow_squash_merge=false -F allow_rebase_merge=false -f merge_commit_title=MERGE_MESSAGE -f merge_commit_message=PR_TITLE
+  gh label create semver:minor --repo acme/widget --force --color 0e8a16 --description 'Merging releases a new minor version'
+  gh label create semver:major --repo acme/widget --force --color 0e8a16 --description 'Merging releases a new major version'
 `
 	const placeholderCommands = `  gh api --method PUT repos/OWNER/REPO/actions/permissions -F enabled=true -f allowed_actions=selected
 `

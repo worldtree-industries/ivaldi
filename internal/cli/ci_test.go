@@ -51,7 +51,7 @@ func TestInitCIWorkflowPinsSharedWorkflowBySHAWithVersionComment(t *testing.T) {
 	}
 }
 
-func TestInitCIWorkflowPassesOnlyHarborSecretsWithReadOnlyPermissions(t *testing.T) {
+func TestInitCIWorkflowPassesOnlyHarborSecretsAndGrantsOnlyWhatReleasesNeed(t *testing.T) {
 	p := newProject(t)
 	if err := p.run("github.com/acme/widget\n", "init"); err != nil {
 		t.Fatalf("init failed: %v", err)
@@ -80,12 +80,25 @@ func TestInitCIWorkflowPassesOnlyHarborSecretsWithReadOnlyPermissions(t *testing
 	if !strings.Contains(ci, "\npermissions:\n  contents: read\n\n") {
 		t.Errorf("expected top-level permissions to be only contents: read, got:\n%s", ci)
 	}
+	// The shared workflow pushes the release tag and reads the merged pull
+	// request's labels; the go job grants exactly that.
+	jobPermissions := "\n    permissions:\n" +
+		"      contents: write\n" +
+		"      issues: read\n" +
+		"      pull-requests: read\n" +
+		"    uses: "
+	if !strings.Contains(ci, jobPermissions) {
+		t.Errorf("expected the go job to grant%s\ngot:\n%s", jobPermissions, ci)
+	}
+	if n := strings.Count(ci, "permissions:"); n != 2 {
+		t.Errorf("expected permissions only at the top level and on the go job, got %d", n)
+	}
 	if strings.Contains(ci, "with:") {
 		t.Errorf("expected no inputs to be set on the shared workflow, got:\n%s", ci)
 	}
 }
 
-func TestInitCIWorkflowTriggersOnMainPullRequestsPushesAndReleaseTags(t *testing.T) {
+func TestInitCIWorkflowTriggersOnMainPullRequestsTheirLabelsPushesAndReleaseTags(t *testing.T) {
 	p := newProject(t)
 	if err := p.run("github.com/acme/widget\n", "init"); err != nil {
 		t.Fatalf("init failed: %v", err)
@@ -95,6 +108,8 @@ func TestInitCIWorkflowTriggersOnMainPullRequestsPushesAndReleaseTags(t *testing
 	want := "on:\n" +
 		"  pull_request:\n" +
 		"    branches: [main]\n" +
+		"    # labeled and unlabeled re-run the release dry run when the bump changes.\n" +
+		"    types: [opened, synchronize, reopened, labeled, unlabeled]\n" +
 		"  push:\n" +
 		"    branches: [main]\n" +
 		"    tags: ['v*.*.*']\n"
