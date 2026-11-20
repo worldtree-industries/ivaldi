@@ -29,7 +29,7 @@ jobs:
       contents: write
       issues: read
       pull-requests: read
-    uses: worldtree-industries/workflows/.github/workflows/go.yml@e27aff84ed75bc3995068bce81b197c7dd6eafff # v1.0.0
+    uses: worldtree-industries/workflows/.github/workflows/go.yml@1871647922e0739445221c34f8917ab1566e46b1 # v1.2.0
     secrets:
       HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
       HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
