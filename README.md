@@ -107,7 +107,7 @@ Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unl
 - `.githooks/pre-commit`: runs `make lint test` before every commit. It needs golangci-lint v2 on `PATH`, and says how to install it if it's missing. `git commit --no-verify` skips it. `core.hooksPath` isn't cloned, so run `make setup-hooks` once in each fresh clone.
 
   To give an existing Go repo the same hook, including a Project created before Ivaldi generated it, use the `ivaldi-hooks` agent skill in `skills/ivaldi-hooks/`. Install it by symlinking that directory into your agent's skills directory, for example `ln -s "$PWD/skills/ivaldi-hooks" ~/.config/opencode/skills/ivaldi-hooks` from a clone of this repo.
-- `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets and runs with read-only permissions.
+- `.github/workflows/ci.yml`: calls the shared workflow in [worldtree-industries/workflows](https://github.com/worldtree-industries/workflows), pinned by commit SHA. It passes only the `HARBOR_USERNAME` and `HARBOR_PASSWORD` secrets. It grants the shared workflow `contents: write`, to push release tags, and read access to issues and pull requests, to read the merged pull request's labels. Nothing else is granted.
 
 **Unmanaged files** are written once, if missing (or, during [Adoption](#adoption), if you agree to overwrite yours), and then belong to you. Ivaldi never touches them again.
 
@@ -122,19 +122,24 @@ Deployables are built with ko on `gcr.io/distroless/static-debian12:nonroot` unl
 
 The shared workflow lints with golangci-lint, runs `go test -race ./...`, and builds the Deployables affected by a change:
 
-- Pull requests build images without pushing them.
-- Pushes to `main` push affected Deployables tagged `sha-<short>`.
-- A `vX.Y.Z` tag pushes the Deployables affected since the previous tag, tagged `vX.Y.Z`.
+- Pull requests build images without pushing them. They also log the version their merge would release, and fail if that release would be rejected (see below).
+- Every merge to `main` is a release. It pushes the Deployables affected since the previous release, tagged with the next `vX.Y.Z`, then pushes that version as a git tag. If the run fails, no tag is pushed, so re-running it retries the release.
+- Other pushes to `main` (not merge commits) push affected Deployables tagged `sha-<short>`, and release nothing.
+- A `vX.Y.Z` tag you push yourself pushes the Deployables affected since the previous tag, tagged `vX.Y.Z`.
+
+A merge releases a patch unless its pull request has the `semver:minor` or `semver:major` label. Only merge commits with GitHub's default subject (`Merge pull request #N from …`) release, which is why `init` turns off squash and rebase merging. A major release from `v2` up needs the module path to end in `/vN`, so rename it, and every import of it, in the same pull request; the shared workflow fails the pull request otherwise.
 
 A Deployable is affected when a Go package it depends on changes, its Manifest entry or base image changes, or its Dockerfile changes. Any change to `go.mod` or `go.sum` affects every Deployable. Images go to `registry.werewolves.fyi/library/<binary>`, using org-level Harbor secrets. Tools are never built as images.
 
 ## GitHub settings
 
-As its last step, `init` applies three settings to the Project's GitHub repository:
+As its last step, `init` applies these settings to the Project's GitHub repository:
 
 - Only GitHub-owned actions, `worldtree-industries/*` and the third-party actions the shared workflow uses may run.
-- The default `GITHUB_TOKEN` is read-only.
+- The default `GITHUB_TOKEN` is read-only. The CI workflow grants the shared workflow what releases need.
 - GitHub Actions may not create or approve pull requests.
+- Pull requests merge only as merge commits, with GitHub's default message.
+- The `semver:minor` and `semver:major` labels exist.
 
 This needs `origin` to point at GitHub and `gh` to be authenticated with admin rights on the repository. If it can't apply them (offline, no repository yet, no rights), `init` still succeeds: it warns and prints the exact `gh` commands to run later. `add` never touches GitHub settings, and Ivaldi never creates repositories or secrets.
 

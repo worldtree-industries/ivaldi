@@ -142,8 +142,8 @@ var layerRules = []layerRule{
 //
 //	gh api repos/worldtree-industries/workflows/commits/<version> --jq .sha
 const (
-	SharedWorkflowSHA     = "e27aff84ed75bc3995068bce81b197c7dd6eafff"
-	SharedWorkflowVersion = "v1.0.0"
+	SharedWorkflowSHA     = "1871647922e0739445221c34f8917ab1566e46b1"
+	SharedWorkflowVersion = "v1.2.0"
 )
 
 // CIPath is where the Managed CI caller workflow lives.
